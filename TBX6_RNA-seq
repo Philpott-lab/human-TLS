@@ -391,6 +391,144 @@ p_ridge_pub <- p_ridge +
 
 p_ridge_pub
 
+
+
+##################################################################################
+######################## GSEA: Zeng - Figure S3E #################################
+##################################################################################
+
+zeng_DEGs_PCW3 <- read.csv(
+  file = file.path(base_dir, "zeng_DEGs_PCW3.csv")
+)
+
+zeng_df <- zeng_DEGs_PCW3[, c("Gene", "celltype")]
+
+# Split into gene lists by cell type
+Zeng_lists <- split(zeng_df$Gene, zeng_df$celltype)
+Zeng_lists <- lapply(Zeng_lists, function(x) sort(unique(as.character(x))))
+names(Zeng_lists) <- str_replace_all(names(Zeng_lists), "_", " ")
+
+# Take top n genes per cell type
+n_top <- 100
+Zeng_lists_top <- lapply(Zeng_lists, function(x) head(x, n_top))
+
+# Check gene counts per cell type
+gene_counts_top <- sapply(Zeng_lists_top, length)
+gene_counts_top
+names(Zeng_lists_top)
+
+# Rename list elements
+names(Zeng_lists_top)[names(Zeng_lists_top) == "Erythroid"] <- "Primitive Erythroid"
+names(Zeng_lists_top)[names(Zeng_lists_top) == "Paraxial mesoderm"] <- "Paraxial Mesoderm"
+names(Zeng_lists_top)[names(Zeng_lists_top) == "Neural tbue 1"] <- "Neural Tube 1"
+names(Zeng_lists_top)[names(Zeng_lists_top) == "Neural tbue 2"] <- "Neural Tube 2"
+names(Zeng_lists_top)[names(Zeng_lists_top) == "Neural tbue 3"] <- "Neural Tube 3"
+
+names(Zeng_lists_top)
+
+# Build TERM2GENE for custom GSEA
+TERM2GENE_tbx6_zeng_top <- stack(Zeng_lists_top)
+colnames(TERM2GENE_tbx6_zeng_top) <- c("gene", "term")
+TERM2GENE_tbx6_zeng_top <- TERM2GENE_tbx6_zeng_top[, c("term", "gene")]
+
+head(TERM2GENE_tbx6_zeng_top)
+table(TERM2GENE_tbx6_zeng_top$term)
+
+length(gene_ranks)
+head(gene_ranks)
+
+# How many overlapping genes?
+sum(names(gene_ranks) %in% TERM2GENE_tbx6_zeng_top$gene)
+
+# Run GSEA
+gsea_tbx6_zeng_multi <- GSEA(
+  geneList = gene_ranks,
+  TERM2GENE = TERM2GENE_tbx6_zeng_top,
+  pvalueCutoff = 1,
+  minGSSize = 5,
+  maxGSSize = 200
+)
+
+gsea_tbx6_zeng_multi@result[, c("ID", "setSize", "NES", "p.adjust")] %>%
+  dplyr::arrange(p.adjust) %>%
+  head()
+
+# Compute pairwise term similarity
+gsea_tbx6_zeng_multi <- pairwise_termsim(gsea_tbx6_zeng_multi)
+
+# Ridgeplot
+n_terms <- 20
+res_zeng <- gsea_tbx6_zeng_multi@result %>%
+  dplyr::arrange(p.adjust)
+
+top_terms_res <- res_zeng %>%
+  dplyr::filter(ID %in% res_zeng$ID[1:n_terms]) %>%
+  dplyr::arrange(desc(NES))
+
+top_terms <- top_terms_res$ID
+
+p_ridge <- ridgeplot(
+  gsea_tbx6_zeng_multi,
+  showCategory = top_terms,
+  fill = "p.adjust",
+  label_format = Inf
+)
+
+min_lim <- 0
+max_lim <- 0.5
+
+colour_scale <- scale_fill_gradientn(
+  colours = c(
+    "#800026",
+    "#FC4E2A",
+    "#FEB24C",
+    "#9ECAE1",
+    "#2166AC",
+    "#053061"
+  ),
+  values = rescale(
+    c(min_lim, 0.01, 0.045, 0.055, 0.3, max_lim),
+    to = c(0, 1),
+    from = c(min_lim, max_lim)
+  ),
+  limits = c(min_lim, max_lim),
+  oob = scales::squish,
+  name = "FDR",
+  breaks = c(0.01, 0.05, 0.10, 0.20, 0.50),
+  labels = c("0.01", "0.05", "0.10", "0.20", "0.50"),
+  guide = guide_colorbar(reverse = TRUE),
+  trans = "pseudo_log"
+)
+
+p_ridge_pub <- p_ridge +
+  colour_scale +
+  labs(
+    x = "Ranked gene list",
+    y = NULL
+  ) +
+  theme_bw(base_size = 10) +
+  theme(
+    plot.title = element_blank(),
+    axis.text.y = element_text(size = 9),
+    axis.text.x = element_text(size = 9),
+    axis.title.x = element_text(size = 10),
+    panel.grid.major.x = element_line(colour = "grey90", size = 0.3),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    legend.position = "right",
+    legend.title = element_text(size = 9),
+    legend.text = element_text(size = 8),
+    strip.background = element_rect(fill = "grey95", colour = NA),
+    strip.text = element_text(size = 9),
+    plot.margin = margin(5, 10, 5, 10, "pt")
+  ) +
+  scale_y_discrete(expand = expansion(mult = c(0.05, 0.1)))
+
+print(p_ridge_pub)
+
+
+
+
 #######################################################################################
 ########################## Importing Tyser scRNA-seq dataset ##########################
 #######################################################################################
@@ -891,3 +1029,4 @@ VlnPlot(
     strip.text = element_text(size = 9),
     plot.margin = margin(5, 10, 5, 10, "pt")
   )
+
