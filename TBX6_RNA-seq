@@ -1,84 +1,89 @@
 library(Seurat)
 library(ggplot2)
-library(sctransform)
 library(future)
-library(gridExtra)
-library(cowplot)
 library(dplyr)
-library(patchwork)
 library(RColorBrewer)
-library(SingleCellExperiment)
-library(slingshot)
-library(tradeSeq)
-library(viridis)
 library(DESeq2)
-library(matrixStats)
 library(pheatmap)
 library(tibble)
-
+library(ggrepel)
+library(clusterProfiler)
+library(enrichplot)
+library(stringr)
+library(Matrix)
+library(biomaRt)
+library(grid)
+library(scales)
 
 palette(brewer.pal(8, "Dark2"))
 
-plan()
-plan("sequential")
 plan("multisession", workers = 1) ### Use this to parallelize
 
-#Increasing max size to 4GB
+# Increasing max size
 options(future.globals.maxSize = 8000 * 1024^2)
+options(timeout = 120)
 
-#Import counts matrix
-dox_TBX6_matrix <- read.delim2(file = "~/Desktop/TBX6 RNA-seq/72KDH3_results/72KDH3-expression-matrix.csv", header = TRUE, sep=",", stringsAsFactors = F)
+# Directories
+base_dir <- "~/Desktop/TBX6 RNA-seq"
+plot_dir <- file.path(base_dir, "plots")
+dir.create(plot_dir, showWarnings = FALSE, recursive = TRUE)
 
-#Fill in blank spaces in "gene name" with the corresponding ENS id. Also give identical gene names a unique suffix
+######################################################
+#################### BULK RNA-SEQ ####################
+######################################################
+
+# Import counts matrix
+dox_TBX6_matrix <- read.delim2(
+  file = file.path(base_dir, "72KDH3_results", "72KDH3-expression-matrix.csv"),
+  header = TRUE,
+  sep = ",",
+  stringsAsFactors = FALSE
+)
+
+# Fill blank gene names with ENS IDs and make names unique
 dox_TBX6_matrix <- dox_TBX6_matrix %>%
-  mutate(gene_name = ifelse(gene_name == "" | is.na(gene_name), gene_id, gene_name))
-dox_TBX6_matrix$gene_name <- make.unique(dox_TBX6_matrix$gene_name, sep=".")
+  dplyr::mutate(gene_name = ifelse(gene_name == "" | is.na(gene_name), gene_id, gene_name))
+
+dox_TBX6_matrix$gene_name <- make.unique(dox_TBX6_matrix$gene_name, sep = ".")
 rownames(dox_TBX6_matrix) <- dox_TBX6_matrix$gene_name
 dox_TBX6_matrix <- dox_TBX6_matrix[, c(-1, -2, -3)]
 
-head(dox_TBX6_matrix)
-
-#Isolates columns containing counts (removes cpm columns)
+# Isolate count columns only
 dox_TBX6_counts <- dox_TBX6_matrix %>%
-  as_tibble(rownames = "gene") %>%
-  dplyr::select(gene, contains("count"))
-dox_TBX6_counts <- dox_TBX6_counts %>%
-  mutate(across(-gene, as.numeric)) %>%  # convert everything except gene to numeric
-  column_to_rownames("gene")            # move gene into rownames
-head(dox_TBX6_counts)
+  tibble::as_tibble(rownames = "gene") %>%
+  dplyr::select(gene, dplyr::contains("count")) %>%
+  dplyr::mutate(dplyr::across(-gene, as.numeric)) %>%
+  tibble::column_to_rownames("gene")
 
-# 1) Select only count columns
-count_df <- dox_TBX6_counts
-
-# 2) Force all columns to integer
+# Force integer counts
 count_df <- data.frame(
-  lapply(count_df, function(x) as.integer(as.character(x))),
+  lapply(dox_TBX6_counts, function(x) as.integer(as.character(x))),
   row.names = rownames(dox_TBX6_counts),
-  check.names = FALSE)
+  check.names = FALSE
+)
 
-# 3) Convert to matrix
+# Convert to matrix and reorder columns
 count_mat <- as.matrix(count_df)
-count_mat <- count_mat[ , c(1, 3, 5, 7, 2, 4, 6, 8)]
+count_mat <- count_mat[, c(1, 3, 5, 7, 2, 4, 6, 8)]
+count_mat <- count_mat[complete.cases(count_mat), ] # delete rows with NA
 
-head(count_mat)
-
+# Metadata
 metaData <- data.frame(colnames(count_mat))
-metaData$treatment <- c("untreated", "untreated", "untreated", "untreated", "dox", "dox", "dox", "dox")
-
-ncol(count_mat)
-nrow(metaData)
+metaData$treatment <- c("untreated", "untreated", "untreated", "untreated",
+                        "dox", "dox", "dox", "dox")
 
 rownames(metaData) <- metaData$colnames.count_mat.
 metaData$colnames.count_mat. <- NULL
-
 metaData$treatment <- factor(metaData$treatment)
 metaData$treatment <- relevel(metaData$treatment, ref = "untreated")
-count_mat <- count_mat[complete.cases(count_mat), ] #delete rows with NA
 
-#Prepare matrices for correct format for DESeq
-dds <- DESeqDataSetFromMatrix(countData=count_mat, 
-                              colData=metaData, 
-                              design=~treatment, tidy = F)
+# Prepare for DESeq2
+dds <- DESeqDataSetFromMatrix(
+  countData = count_mat,
+  colData = metaData,
+  design = ~treatment,
+  tidy = FALSE
+)
 
 ###################################
 ############ Run DESeq2 ###########
@@ -91,123 +96,96 @@ dds <- DESeq(dds)
 ######################################################
 
 res <- results(dds)
-res <- res[order(res$padj),]
-vsdata <- DESeq2::vst(dds, blind=F) # vst function will perform variance stabilizing transformation
+res <- res[order(res$padj), ]
+write.csv(res, "~/Desktop/res_tbx6.csv")
+res_tb <- res
 
-#######################################
-#######################################
-######## Correlation Matrix ###########
-#######################################
-#######################################
+# variance stabilised data for plotting
+vsdata <- DESeq2::vst(dds, blind = FALSE)
+
+################################################
+########### PCA plots - Figure S3B #############
+################################################
+
+group_cols <- c(
+  "untreated" = "#5B7FA4",
+  "dox" = "#E4302A")
+
+plotPCA(vsdata, intgroup = "treatment", pcsToUse = 1:2) +
+  ggplot2::xlim(-10, 10) +
+  ggplot2::ylim(-4, 4) +
+  scale_colour_manual(values = group_cols) +
+  theme(
+    panel.border = element_rect(colour = "black", fill = NA, size = 1),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_rect(fill = "white", colour = "white"),
+    line = element_blank(),
+    axis.title = element_text(size = 15),
+    axis.text = element_text(size = 15))
+
+plotPCA(vsdata, intgroup = "treatment", pcsToUse = 2:3) +
+  ggplot2::xlim(-5, 5) +
+  ggplot2::ylim(-2.5, 2.5) +
+  scale_colour_manual(values = group_cols) +
+  theme(
+    panel.border = element_rect(colour = "black", fill = NA, size = 1),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_rect(fill = "white", colour = "white"),
+    line = element_blank(),
+    axis.title = element_text(size = 15),
+    axis.text = element_text(size = 15))
+
+
+
+####################################################
+######## Correlation Matrix - Figure S3C ###########
+####################################################
 
 vsd_mat <- assay(vsdata)
-
-# Compute the pairwise correlation values
 sample_cor_matrix <- cor(vsd_mat)
 
-library(pheatmap)
-library(RColorBrewer)
-library(grid)
-
-# 1) Single-hue palette
 corr_colors <- colorRampPalette(c("white", "#005824"))(100)
 
-# 2) Annotation colors
 ann_colors <- list(
   treatment = c(
-    "untreated" = "#5B7FA4",  
-    "dox"       = "#E4302A" 
+    "untreated" = "#5B7FA4",
+    "dox" = "#E4302A"
   )
 )
 
-# 3) Make the pheatmap object
-ph <- pheatmap(
+pheatmap(
   sample_cor_matrix,
-  annotation_col           = metaData,
-  annotation_colors        = ann_colors,
-  color                    = corr_colors,
+  annotation_col = metaData,
+  annotation_colors = ann_colors,
+  color = corr_colors,
   clustering_distance_rows = "correlation",
   clustering_distance_cols = "correlation",
-  clustering_method        = "complete",
-  border_color             = NA,
-  show_rownames            = FALSE,
-  show_colnames            = FALSE,
-  fontsize                 = 9,
-  fontsize_annotation_col  = 9,
-  main                     = "",
-  legend                   = TRUE,
-  legend_breaks            = c(0, 0.5, 1),
-  legend_labels            = c("0", "0.5", "1"),
-  treeheight_row           = 2,   
-  treeheight_col           = 2,   
-  cellwidth                = 10,   
-  cellheight               = 10
+  clustering_method = "complete",
+  border_color = NA,
+  show_rownames = FALSE,
+  show_colnames = FALSE,
+  fontsize = 9,
+  fontsize_annotation_col = 9,
+  main = "",
+  legend = TRUE,
+  legend_breaks = c(0, 0.5, 1),
+  legend_labels = c("0", "0.5", "1"),
+  treeheight_row = 2,
+  treeheight_col = 2,
+  cellwidth = 10,
+  cellheight = 10
 )
-
-png("sample_correlation_heatmap_square.png",
-    width = 1600, height = 1600, res = 600)
-grid.newpage()
-grid.draw(ph$gtable)
-dev.off()
-
-
-####################################
-####################################
-########### PCA plots ##############
-####################################
-####################################
-
-group_cols <- c(
-  "untreated" = "#5B7FA4",  
-  "dox"       = "#E4302A"   
-)
-
-setwd("~/Desktop/TBX6 RNA-seq/plots/")
-pdf("dox_TBX6_DESeq2_PCA_1-2_leg.pdf", width = 5, height = 5)
-plotPCA(vsdata, intgroup="treatment", pcsToUse = 1:2) + ggplot2::xlim(-10, 10)+ggplot2::ylim(-4, 4)+
-  scale_colour_manual(values = group_cols) +
-  theme(
-    panel.border = element_rect(colour = "black", fill = NA, size = 1),
-    panel.grid.major = element_blank(),
-    panel.grid.minor = element_blank(),
-    panel.background = element_rect(fill = 'white', colour = 'white'),
-    line = element_blank(),
-    axis.title = element_text(size = 15),
-    axis.text = element_text(size = 15)) 
-dev.off()
-
-setwd("~/Desktop/TBX6 RNA-seq/plots/")
-pdf("dox_TBX6_DESeq2_PCA_2-3_leg.pdf", width = 5, height = 5)
-plotPCA(vsdata, intgroup="treatment", pcsToUse = 2:3) + ggplot2::xlim(-5, 5)+ggplot2::ylim(-2.5, 2.5)+
-  scale_colour_manual(values = group_cols) +
-  theme(
-    panel.border = element_rect(colour = "black", fill = NA, size = 1),
-    panel.grid.major = element_blank(),
-    panel.grid.minor = element_blank(),
-    panel.background = element_rect(fill = 'white', colour = 'white'),
-    line = element_blank(),
-    axis.title = element_text(size = 15),
-    axis.text = element_text(size = 15)) 
-dev.off()
 
 
 ##################################################################
-###################### MAKING VOLCANO PLOTS ######################
+###################### Volcano plot  - Figure 3E #################
 ##################################################################
-
-## Turn results into numerical dataframe ##
 
 res_frame <- data.frame(res)
 res_frame$log2FoldChange <- as.numeric(res_frame$log2FoldChange)
 res_frame$gene_name <- as.character(rownames(res_frame))
-head(res_frame)
-
-##################################################################
-############# GGPLOT DotPlot Volcano plot ########################
-##################################################################
-library(dplyr)
-library(ggplot2)
-library(ggrepel)
 
 gene_list <- c(
   "mCherry", "TBX21", "TBX2", "RUNX3", "FOXC1",
@@ -216,45 +194,39 @@ gene_list <- c(
 )
 
 res_frame <- res_frame %>%
-  filter(!is.na(padj) & !is.na(log2FoldChange)) %>%
-  mutate(
+  dplyr::filter(!is.na(padj) & !is.na(log2FoldChange)) %>%
+  dplyr::mutate(
     negLog10p = -log10(padj),
-    significance = case_when(
-      padj < 0.05 & log2FoldChange >  0.58 ~ "Significant up",
+    significance = dplyr::case_when(
+      padj < 0.05 & log2FoldChange > 0.58  ~ "Significant up",
       padj < 0.05 & log2FoldChange < -0.58 ~ "Significant down",
       TRUE                                 ~ "Not significant"
     ),
     is_labelled = gene_name %in% gene_list,
-    label_dir = case_when(
-      is_labelled & log2FoldChange >  0.58 ~ "Label up",
+    label_dir = dplyr::case_when(
+      is_labelled & log2FoldChange > 0.58  ~ "Label up",
       is_labelled & log2FoldChange < -0.58 ~ "Label down",
       TRUE                                 ~ NA_character_
     )
   )
 
-# cap infinite -log10(FDR)
+# Cap infinite -log10(FDR)
 max_finite <- max(res_frame$negLog10p[is.finite(res_frame$negLog10p)])
 res_frame$negLog10p[is.infinite(res_frame$negLog10p)] <- max_finite + 1
 
-nrow(res_frame[res_frame$significance == "Significant up", ]) #1035
-nrow(res_frame[res_frame$significance == "Significant down", ]) #338
-
-# build plot
-p <- ggplot(res_frame, aes(x = log2FoldChange, y = negLog10p)) +
-  # base layer: all points
+ggplot(res_frame, aes(x = log2FoldChange, y = negLog10p)) +
   geom_point(aes(color = significance), size = 0.6, alpha = 1) +
-  # highlight labelled significant genes
   geom_point(
     data = subset(res_frame, !is.na(label_dir)),
     aes(color = label_dir),
     size = 1
   ) +
   scale_color_manual(values = c(
-    "Not significant"  = "grey90",
-    "Significant up"   = "#f7c2ac",
+    "Not significant" = "grey90",
+    "Significant up" = "#f7c2ac",
     "Significant down" = "#92c5de",
-    "Label up"         = "#c90422",
-    "Label down"       = "#096fad"
+    "Label up" = "#c90422",
+    "Label down" = "#096fad"
   )) +
   labs(
     x = "log2 fold change",
@@ -266,14 +238,15 @@ p <- ggplot(res_frame, aes(x = log2FoldChange, y = negLog10p)) +
     panel.border = element_rect(colour = "black", fill = NA, size = 1),
     panel.grid.major = element_blank(),
     panel.grid.minor = element_blank(),
-    panel.background = element_rect(fill = 'white', colour = 'white'),
+    panel.background = element_rect(fill = "white", colour = "white"),
     axis.text = element_text(size = 12),
     axis.title = element_text(size = 16),
     legend.position = "none"
-  ) + scale_y_continuous(
+  ) +
+  scale_y_continuous(
     trans = scales::pseudo_log_trans(base = 10),
-    limits = c(0, max_finite + 1),  # adjust lower bound so nothing goes negative
-    breaks = c(1, 10, 50, 100, 200, 300),  # you can tune these
+    limits = c(0, max_finite + 1),
+    breaks = c(1, 10, 50, 100, 200, 300),
     labels = scales::comma
   ) +
   scale_x_continuous(limits = c(-5, 10)) +
@@ -289,100 +262,34 @@ p <- ggplot(res_frame, aes(x = log2FoldChange, y = negLog10p)) +
     max.overlaps = 100
   )
 
-p
 
-# save PNG
-ggsave("dox_TBX6_DESeq2_dotplot_highlight_pseudolog.png", p, width = 5, height = 5, dpi = 600)
-
-
-#################################################################
-#################################################################
-################# UP REGULATED GENES ############################
-#################################################################
-#################################################################
-##### Non-ranked GO analysis using clusterProfiler enrichGO #####
-#################################################################
-#################################################################
-
-library(DESeq2)
-library(clusterProfiler)
-library(org.Hs.eg.db)
-library(ggplot2)
-library(dplyr)
-
-# Directories
-setwd("~/Desktop/TBX6 RNA-seq/plots")
-
-#################################################################
-################# GET DESEQ2 RESULTS ############################
-#################################################################
+#######################################################################
+######################## GSEA: Tyser - Figure 3F ######################
+#######################################################################
 
 res <- results(dds)
-res <- res[order(res$padj),]
-head(res)
+res <- res[order(res$padj), ]
 
 res_frame <- as.data.frame(res)
 res_frame$log2FoldChange <- as.numeric(res_frame$log2FoldChange)
 res_frame$gene_name <- rownames(res_frame)
 
-# Universe for GO
-all_genes <- rownames(res_frame)
-
-################################################################################################
-################ TRY GSEA WITH TYSER DATASET ALL CLUSTERS!! LOOK OUT FOR PS ENRICHMENT #########
-################################################################################################
-
-##    - dds (DESeqDataSet)
-##    - res (DESeq2 results from results(dds))
-
-library(dplyr)
-library(clusterProfiler)
-library(enrichplot)
-library(stringr)
-
-## 1. Build ranked gene list for GSEA using  Wald statistic
-
-# Make sure res is a data.frame and rownames are gene symbols
 res <- as.data.frame(res)
 
 gene_ranks <- res$stat
 names(gene_ranks) <- rownames(res)
-
-# Drop NAs and sort decreasing, as required by GSEA
 gene_ranks <- gene_ranks[!is.na(gene_ranks)]
 gene_ranks <- sort(gene_ranks, decreasing = TRUE)
 
-
-##################################################################################
-###################### Tyser C7 Markers ##########################################
-##################################################################################
-
-# Read data
+# Read Tyser marker data
 Tyser_CS7 <- read.csv(
-  file = "/Users/jaypea/Desktop/TBX6 RNA-seq/Tyser_41586_2021_4158_MOESM3_ESM.csv")
+  file = file.path(base_dir, "Tyser_41586_2021_4158_MOESM3_ESM.csv")
+)
 
-# Make each column a character vector in a named list
-Tyser_lists <- lapply(Tyser_CS7, as.character)
-
-# Clean up: remove duplicates & sort
-Tyser_lists <- lapply(Tyser_lists, function(x) sort(unique(x)))
-
-# Make sure terms have nice names
-names(Tyser_lists) <- str_replace_all(names(Tyser_lists), "_", " ")
-
-## n top genes per cell type
+# Top n genes per cell type
 n_top <- 50
-
-## subset the top N rows of the marker table
 Tyser_top <- Tyser_CS7[1:n_top, , drop = FALSE]
-
-## convert each column into a character vector (one list element per cell type)
 Tyser_lists_top <- lapply(Tyser_top, function(x) unique(as.character(x)))
-
-## quick sanity checks
-sapply(Tyser_lists_top, length)  # should be ≈ n_top for each term
-names(Tyser_lists_top)
-Tyser_lists_top$PS[1:10]
 
 names(Tyser_lists_top) <- c(
   "Primitive Streak",
@@ -398,82 +305,67 @@ names(Tyser_lists_top) <- c(
   "Axial Mesoderm"
 )
 
-## 3. Build TERM2GENE data.frame for custom GSEA
 TERM2GENE_tbx6_tyser_top <- stack(Tyser_lists_top)
 colnames(TERM2GENE_tbx6_tyser_top) <- c("gene", "term")
 TERM2GENE_tbx6_tyser_top <- TERM2GENE_tbx6_tyser_top[, c("term", "gene")]
 
-# how many overlapping genes
-sum(names(gene_ranks) %in% TERM2GENE_tbx6_tyser_top$gene) #408
-
-## 4. Run multi-set GSEA
 gsea_tbx6_tyser_multi <- GSEA(
-  geneList     = gene_ranks,
-  TERM2GENE    = TERM2GENE_tbx6_tyser_top,
+  geneList = gene_ranks,
+  TERM2GENE = TERM2GENE_tbx6_tyser_top,
   pvalueCutoff = 1,
-  minGSSize    = 5,
-  maxGSSize    = 200   # anything > n_top is fine
+  minGSSize = 5,
+  maxGSSize = 200
 )
 
 gsea_tbx6_tyser_multi@result[, c("ID", "setSize", "NES", "p.adjust")] %>%
-  arrange(p.adjust) %>%
+  dplyr::arrange(p.adjust) %>%
   head()
 
-## 5. Compute pairwise term similarity (for plotting)
 gsea_tbx6_tyser_multi <- pairwise_termsim(gsea_tbx6_tyser_multi)
 
-## 6. Ridgeplot
-library(dplyr)
-library(enrichplot)
-library(scales)
-
-## 1. Take top terms by smallest adjusted p-value
 n_terms <- 10
 res_tyser <- gsea_tbx6_tyser_multi@result %>%
-  arrange(p.adjust)
+  dplyr::arrange(p.adjust)
 
 top_terms_res <- res_tyser %>%
-  filter(ID %in% res_tyser$ID[1:n_terms]) %>%
-  arrange(desc(NES))   # order by NES (strongest enrichment at top)
+  dplyr::filter(ID %in% res_tyser$ID[1:n_terms]) %>%
+  dplyr::arrange(desc(NES))
 
 top_terms <- top_terms_res$ID
 
-## 2. Ridgeplot
 p_ridge <- ridgeplot(
   gsea_tbx6_tyser_multi,
   showCategory = top_terms,
-  fill         = "p.adjust",
+  fill = "p.adjust",
   label_format = Inf
 )
 
-## 3. Colour scale
 min_lim <- 0
 max_lim <- 0.5
 
 colour_scale <- scale_fill_gradientn(
   colours = c(
-    "#800026",  # very low p, deep red
-    "#FC4E2A",  # low p, orange-red
-    "#FEB24C",  # ~0.05, yellow
-    "#9ECAE1",  # above 0.06, light blue
-    "#2166AC",  # mid / higher p
-    "#053061"   # highest p, dark blue
+    "#800026",
+    "#FC4E2A",
+    "#FEB24C",
+    "#9ECAE1",
+    "#2166AC",
+    "#053061"
   ),
-  values = rescale(
+  values = scales::rescale(
     c(min_lim, 0.01, 0.045, 0.055, 0.3, max_lim),
-    to   = c(0, 1),
+    to = c(0, 1),
     from = c(min_lim, max_lim)
   ),
   limits = c(min_lim, max_lim),
-  oob    = scales::squish,
-  name   = "FDR",
+  oob = scales::squish,
+  name = "FDR",
   breaks = c(0.01, 0.05, 0.10, 0.20, 0.50),
   labels = c("0.01", "0.05", "0.10", "0.20", "0.50"),
-  guide  = guide_colorbar(reverse = TRUE),
-  trans  = "pseudo_log"
+  guide = guide_colorbar(reverse = TRUE),
+  trans = "pseudo_log"
 )
 
-## 4. Apply labels + theme
 p_ridge_pub <- p_ridge +
   colour_scale +
   labs(
@@ -482,45 +374,28 @@ p_ridge_pub <- p_ridge +
   ) +
   theme_bw(base_size = 10) +
   theme(
-    plot.title   = element_blank(),
-    axis.text.y  = element_text(size = 9),
-    axis.text.x  = element_text(size = 9),
+    plot.title = element_blank(),
+    axis.text.y = element_text(size = 9),
+    axis.text.x = element_text(size = 9),
     axis.title.x = element_text(size = 10),
     panel.grid.major.x = element_line(colour = "grey90", size = 0.3),
     panel.grid.major.y = element_blank(),
-    panel.grid.minor   = element_blank(),
+    panel.grid.minor = element_blank(),
     legend.position = "right",
-    legend.title    = element_text(size = 9),
-    legend.text     = element_text(size = 8),
+    legend.title = element_text(size = 9),
+    legend.text = element_text(size = 8),
     strip.background = element_rect(fill = "grey95", colour = NA),
-    strip.text       = element_text(size = 9),
-    plot.margin      = margin(5, 10, 5, 10, "pt")
+    strip.text = element_text(size = 9),
+    plot.margin = margin(5, 10, 5, 10, "pt")
   )
 
-print(p_ridge_pub)
+p_ridge_pub
 
+#######################################################################################
+########################## Importing Tyser scRNA-seq dataset ##########################
+#######################################################################################
 
-## 7. Save ridgeplot
-
-setwd("~/Desktop/TBX6 RNA-seq/plots")
-
-pdf("gsea_tbx6_tyser_inferno_ridgeplot.pdf", width = 5, height = 2)
-print(p_ridge_pub)
-dev.off()
-
-
-#############################################################################
-########################## Module scores and UMAPs ##########################
-########################## Importing Tyser dataset ##########################
-#############################################################################
-
-library(Matrix)
-library(Seurat)
-library(dplyr)
-library(ggplot2)
-
-# Paths
-data_dir   <- "~/Desktop/TBX6 RNA-seq/Tyser_CS7"
+data_dir <- file.path(base_dir, "Tyser_CS7")
 counts_file <- file.path(data_dir, "E-MTAB-9388.aggregated_filtered_normalised_counts.mtx.gz")
 genes_file  <- file.path(data_dir, "E-MTAB-9388.aggregated_filtered_normalised_counts.mtx_rows.gz")
 cells_file  <- file.path(data_dir, "E-MTAB-9388.aggregated_filtered_normalised_counts.mtx_cols.gz")
@@ -537,315 +412,181 @@ colnames(counts) <- cells[[1]]
 
 # Create Seurat object
 Tyser <- CreateSeuratObject(
-  counts       = counts,
-  project      = "Tyser_CS7",
-  min.cells    = 0,
+  counts = counts,
+  project = "Tyser_CS7",
+  min.cells = 0,
   min.features = 0
 )
 
 # Add metadata
 meta_file <- file.path(data_dir, "E-MTAB-9388.cell_metadata.tsv")
-meta      <- read.delim(meta_file, stringsAsFactors = FALSE)
-
-# Check overlap between IDs and Seurat cells
-sum(meta$id %in% colnames(Tyser))       # should be > 0
-sum(colnames(Tyser) %in% meta$id)       # ideally == ncol(Tyser)
-
-# Reorder metadata to match Seurat cell order
+meta <- read.delim(meta_file, stringsAsFactors = FALSE)
 meta2 <- meta[match(colnames(Tyser), meta$id), ]
-
-# Set rownames to the id column
 rownames(meta2) <- meta2$id
-
-# Add to Seurat
 Tyser <- AddMetaData(Tyser, metadata = meta2)
 
 # Import UMAP and attach as reduction
 umap_file <- file.path(data_dir, "E-MTAB-9388.umap_neigh_10.tsv")
-umap      <- read.delim(umap_file, stringsAsFactors = FALSE)
+umap <- read.delim(umap_file, stringsAsFactors = FALSE)
 
-# First column = cell IDs
-cell_ids_umap   <- umap[[1]]
-cell_ids_seurat <- colnames(Tyser)
-
-length(cell_ids_seurat)
-length(cell_ids_umap)
-
-# Overlap
-common_cells <- intersect(cell_ids_seurat, cell_ids_umap)
-length(common_cells)
-
-# Subset Seurat object to only cells that have UMAP coords
+cell_ids_umap <- umap[[1]]
+common_cells <- intersect(colnames(Tyser), cell_ids_umap)
 Tyser <- subset(Tyser, cells = common_cells)
 
-# Set rownames on UMAP table
 rownames(umap) <- umap[[1]]
-
-# Subset UMAP rows to those same cells and grab only the two coord columns
 umap_mat <- as.matrix(umap[common_cells, 2:3])
 colnames(umap_mat) <- c("UMAP_1", "UMAP_2")
 rownames(umap_mat) <- common_cells
 
 Tyser[["umap"]] <- CreateDimReducObject(
   embeddings = umap_mat,
-  key        = "UMAP_",
-  assay      = DefaultAssay(Tyser)
+  key = "UMAP_",
+  assay = DefaultAssay(Tyser)
 )
-
 
 # Tidy author cell-type labels
-
-Tyser@meta.data$inferred_cell_type_._authors_labels <- recode(
+Tyser@meta.data$inferred_cell_type_._authors_labels <- dplyr::recode(
   Tyser@meta.data$inferred_cell_type_._authors_labels,
   "hemogenic endothelial progenitor" = "Hemato-Endothelial Progenitors",
-  "yolk sac mesoderm"                = "Extraembryonic Mesoderm",
-  "erythrocyte"                      = "Erythroblasts",
-  "endodermal cell"                  = "Endoderm",
-  "primitive streak"                 = "Primitive Streak",
-  "advanced mesoderm"                = "Advanced Mesoderm",
-  "epiblast cell"                    = "Epiblast",
-  "ectodermal cell"                  = "Ectoderm (Amniotic/Embryonic)",
-  "emergent mesoderm"                = "Emergent Mesoderm",
-  "nascent mesoderm"                 = "Nascent Mesoderm",
-  "axial mesoderm"                   = "Axial Mesoderm"
+  "yolk sac mesoderm" = "Extraembryonic Mesoderm",
+  "erythrocyte" = "Erythroblasts",
+  "endodermal cell" = "Endoderm",
+  "primitive streak" = "Primitive Streak",
+  "advanced mesoderm" = "Advanced Mesoderm",
+  "epiblast cell" = "Epiblast",
+  "ectodermal cell" = "Ectoderm (Amniotic/Embryonic)",
+  "emergent mesoderm" = "Emergent Mesoderm",
+  "nascent mesoderm" = "Nascent Mesoderm",
+  "axial mesoderm" = "Axial Mesoderm"
 )
-
-# Normalization
 
 Tyser <- NormalizeData(Tyser, verbose = FALSE)
 
-# Plot UMAP by author cell-type labels
 
-setwd("~/Desktop/TBX6 RNA-seq/plots/")
+# Plot UMAP by author cell-type labels - Figure S3F
 
 DimPlot(
   Tyser,
   reduction = "umap",
-  group.by  = "inferred_cell_type_._authors_labels",
-  label     = FALSE,
-  pt.size   = 0.5,
+  group.by = "inferred_cell_type_._authors_labels",
+  label = FALSE,
+  pt.size = 0.5,
   sizes.highlight = 0.5
 ) +
   theme(
-    panel.border     = element_rect(colour = "black", fill = NA, size = 1),
-    axis.text.x      = element_blank(),
-    axis.ticks.x     = element_blank(),
-    axis.text.y      = element_blank(),
-    axis.ticks.y     = element_blank(),
-    axis.title.x     = element_text(hjust = 0, vjust = 1),
-    axis.title.y     = element_text(hjust = 0, vjust = 0),
+    panel.border = element_rect(colour = "black", fill = NA, size = 1),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.title.x = element_text(hjust = 0, vjust = 1),
+    axis.title.y = element_text(hjust = 0, vjust = 0),
     panel.grid.major = element_blank(),
     panel.grid.minor = element_blank(),
     panel.background = element_rect(fill = "white", colour = "white"),
-    line             = element_blank(),
-    plot.title       = element_blank()
+    line = element_blank(),
+    plot.title = element_blank()
   ) +
   labs(
     title = NULL,
-    x     = "UMAP 1",
-    y     = "UMAP 2")
-
-ggsave("Tyser_celltype_labels.png",
-       Tyser, width = 4, height = 4, dpi = 600, units = "in")
+    x = "UMAP 1",
+    y = "UMAP 2"
+  )
 
 
-## Plot endogenous TBX6 expression
-setwd("~/Desktop/TBX6 RNA-seq/plots/")
-pdf("Tyser_TBX6_expression_UMAP.pdf", width = 7, height = 6)
+# Plot endogenous TBX6 expression - Figure S3G
+
 FeaturePlot(
   Tyser,
-  features  = "ENSG00000149922",
+  features = "ENSG00000149922",
   reduction = "umap",
-  cols      = c("grey96", "#313695"),
+  cols = c("grey96", "#313695"),
   min.cutoff = "q1",
   max.cutoff = "q99",
-  order      = TRUE,
-  pt.size    = 1)+
-  theme(panel.border = element_rect(colour = "black", fill=NA, size=1), 
-        axis.text.x=element_blank(),
-        axis.ticks.x=element_blank(),
-        axis.text.y=element_blank(),
-        axis.ticks.y=element_blank(),
-        axis.title.x=element_text(hjust = 0, vjust=1),
-        axis.title.y=element_text(hjust = 0, vjust=-0),
-        panel.grid.major = element_blank(),
-        panel.grid.minor = element_blank(),
-        panel.background = element_rect(fill = 'white', colour = 'white'),
-        line = element_blank(),
-        plot.title = element_blank())+labs(title = NULL,x="UMAP 1", y ="UMAP 2")
-dev.off()
-
+  order = TRUE,
+  pt.size = 1
+) +
+  theme(
+    panel.border = element_rect(colour = "black", fill = NA, size = 1),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.title.x = element_text(hjust = 0, vjust = 1),
+    axis.title.y = element_text(hjust = 0, vjust = 0),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_rect(fill = "white", colour = "white"),
+    line = element_blank(),
+    plot.title = element_blank()
+  ) +
+  labs(title = NULL, x = "UMAP 1", y = "UMAP 2")
 
 #############################################################################
-#############################################################################
-####################### Plotting TBX6 module onto Tyser dataset #############
-#############################################################################
+################### Generating TBX6 module for Tyser dataset ################
 #############################################################################
 
-#### Creating TBX6 module in ENSG terms as all Tyser genes are ENSG ####
+res_tb <- read.csv(file = file.path(base_dir, "res_tbx6.csv"))
 
-library(biomaRt)
-library(dplyr)
-
-res_tb <- read.csv(file = "~/Desktop/TBX6 RNA-seq/res_tbx6.csv")  # res_tbx6 is res
-
-# Filter by significance & direction
 res_tb_sig <- res_tb %>%
   as.data.frame() %>%
-  filter(!is.na(padj),
-         padj < 0.05,
-         log2FoldChange > 2) %>%
-  arrange(desc(log2FoldChange))
+  dplyr::filter(!is.na(padj), padj < 0.05, log2FoldChange > 2) %>%
+  dplyr::arrange(desc(log2FoldChange))
 
 n_top <- 500
-
-options(timeout = 120)
 
 mart <- useEnsembl("genes", dataset = "hsapiens_gene_ensembl")
 
 conv <- getBM(
   attributes = c("hgnc_symbol", "ensembl_gene_id"),
-  filters    = "hgnc_symbol",
-  values     = unique(res_tb_sig$X),
-  mart       = mart
+  filters = "hgnc_symbol",
+  values = unique(res_tb_sig$X),
+  mart = mart
 )
 
-# Join Ensembl IDs onto DE results
 res_tb_sig2 <- res_tb_sig %>%
-  left_join(conv, by = c("X" = "hgnc_symbol")) %>%
-  # keep only rows with a valid Ensembl ID
-  filter(!is.na(ensembl_gene_id)) %>%
-  # keep only genes that are actually present in Tyser
-  filter(ensembl_gene_id %in% rownames(Tyser)) %>%
-  # make sure each Ensembl ID appears only once (take highest log2FC if duplicated)
-  arrange(desc(log2FoldChange)) %>%
-  distinct(ensembl_gene_id, .keep_all = TRUE)
+  dplyr::left_join(conv, by = c("X" = "hgnc_symbol")) %>%
+  dplyr::filter(!is.na(ensembl_gene_id)) %>%
+  dplyr::filter(ensembl_gene_id %in% rownames(Tyser)) %>%
+  dplyr::arrange(desc(log2FoldChange)) %>%
+  dplyr::distinct(ensembl_gene_id, .keep_all = TRUE)
 
-# Now take the top n_top *after* intersection with Tyser's gene set
 tbx6_module_ens <- res_tb_sig2$ensembl_gene_id[seq_len(min(n_top, nrow(res_tb_sig2)))]
 
-length(tbx6_module_ens)  # should be <= 200, but maximized given Tyser's genes
-
-Tyser <- AddModuleScore(
-  object   = Tyser,
-  features = list(tbx6_module_ens),
-  name     = "TBX6_Module"
-)
-
-# Check what got added
-colnames(Tyser@meta.data)[grepl("TBX6_Module", colnames(Tyser@meta.data))]
-head(Tyser@meta.data[, grepl("TBX6_Module", colnames(Tyser@meta.data))])
-
-
-setwd("~/Desktop/TBX6 RNA-seq/plots/")
-pdf("Tyser_TBX6_500module_UMAP.pdf", width = 7, height = 6)
-FeaturePlot(
-  Tyser,
-  features  = "TBX6_Module1",
-  reduction = "umap",
-  cols      = c("grey96", "#313695"),
-  min.cutoff = "q1",
-  max.cutoff = "q99",
-  order      = TRUE,
-  pt.size    = 1)+
-  theme(panel.border = element_rect(colour = "black", fill=NA, size=1), 
-        axis.text.x=element_blank(),
-        axis.ticks.x=element_blank(),
-        axis.text.y=element_blank(),
-        axis.ticks.y=element_blank(),
-        axis.title.x=element_text(hjust = 0, vjust=1),
-        axis.title.y=element_text(hjust = 0, vjust=-0),
-        panel.grid.major = element_blank(),
-        panel.grid.minor = element_blank(),
-        panel.background = element_rect(fill = 'white', colour = 'white'),
-        line = element_blank(),
-        plot.title = element_blank())+labs(title = NULL,x="UMAP 1", y ="UMAP 2")
-dev.off()
-
-
-
-
-################################################################
-### Order groups by mean TBX6 module score for Violin Plot ###
-################################################################
-
-library(dplyr)
-library(Seurat)
-
-# 1. Get ordering of groups by mean TBX6 module score
-order_levels <- Tyser@meta.data %>%
-  group_by(inferred_cell_type_._authors_labels) %>%
-  summarise(mean_TBX6 = mean(TBX6_Module1, na.rm = TRUE)) %>%
-  arrange(mean_TBX6) %>%
-  pull(inferred_cell_type_._authors_labels)
-
-# 2. Set that order on the metadata column used for group.by
-Tyser@meta.data$inferred_cell_type_._authors_labels <- factor(
-  Tyser@meta.data$inferred_cell_type_._authors_labels,
-  levels = order_levels
-)
-
-# 3. Plot, x-axis now ordered from lowest → highest TBX6_Module1
-setwd("~/Desktop/TBX6 RNA-seq/plots/")
-pdf("Tyser_TBX6_500module_ordered.pdf", width = 8, height = 6)
-VlnPlot(
-  Tyser,
-  features = "TBX6_Module1",
-  group.by = "inferred_cell_type_._authors_labels",
-  pt.size  = 0.8,
-  log = FALSE)
-dev.off()
-
-
-
 
 #############################################################################
-#############################################################################
-####################### Plotting TBX6 module onto Zeng dataset ##############
-#############################################################################
+########################## Prepping Zeng dataset ############################
 #############################################################################
 
-library(Seurat)
-
-# Load data
 PCW3.sub <- readRDS("~/Desktop/zeng/PCW3.sub.rds")
 zeng_metadata <- read.csv("~/Desktop/zeng/zeng_metadata.csv", stringsAsFactors = FALSE)
 
-# Select relevant columns
 zeng_metadata <- zeng_metadata[, c("week_stage", "louvain", "cell_type",
                                    "umap1", "umap2", "barcode")]
 
-# Clean metadata: remove empty/NA barcode rows and duplicates
-zeng_metadata <- subset(zeng_metadata,
-                        barcode != "" & !is.na(barcode) & !duplicated(barcode))
+zeng_metadata <- subset(
+  zeng_metadata,
+  barcode != "" & !is.na(barcode) & !duplicated(barcode)
+)
 
-# Set rownames to barcode
 rownames(zeng_metadata) <- zeng_metadata$barcode
 
-# Filter Seurat to cells found in metadata
 common_cells <- intersect(colnames(PCW3.sub), zeng_metadata$barcode)
 PCW3.sub <- subset(PCW3.sub, cells = common_cells)
 
-# Make UMAP matrix
 umap_use <- as.matrix(zeng_metadata[common_cells, c("umap1", "umap2")])
 colnames(umap_use) <- c("UMAP_1", "UMAP_2")
+rownames(umap_use) <- common_cells
 
-# Add UMAP from metadata
 PCW3.sub[["zeng.umap"]] <- CreateDimReducObject(
   embeddings = umap_use,
   key = "ZengUMAP_",
   assay = DefaultAssay(PCW3.sub)
 )
 
-# Add metadata
 PCW3.sub$cell_type  <- zeng_metadata[common_cells, "cell_type"]
 PCW3.sub$week_stage <- zeng_metadata[common_cells, "week_stage"]
 PCW3.sub$louvain    <- zeng_metadata[common_cells, "louvain"]
-
-# Plot
-DimPlot(PCW3.sub, reduction = "zeng.umap", group.by = "cell_type", label = TRUE)
-
-levels(PCW3.sub$cell_type)
 
 PCW3.sub@meta.data$cell_type <- dplyr::recode(
   PCW3.sub@meta.data$cell_type,
@@ -857,497 +598,223 @@ PCW3.sub@meta.data$cell_type <- dplyr::recode(
 )
 
 
-##################################################################################################
-############################## Finding marker genes of Zeng dataset ##############################
-##################################################################################################
+#### Plotting cell types using Seurat DimPlot - Figure S3J
 
-library(dplyr)
-Idents(PCW3.sub) <- "cell_type"
-
-DefaultAssay(PCW3.sub) <- "SCT"
-PCW3.sub <- PrepSCTFindMarkers(PCW3.sub)
-
-PCW3.sub.markers <- FindAllMarkers(PCW3.sub,
-                                           assay = "SCT",
-                                           only.pos = TRUE, 
-                                           min.pct = 0.25, 
-                                           logfc.threshold = 0.25,
-                                           min.diff.pct = 0.2)
-
-PCW3.sub.markers <- subset(PCW3.sub.markers, 
-                           PCW3.sub.markers$avg_log2FC > 0.3219 & 
-                             PCW3.sub.markers$p_val_adj < 10E-8) #0.3219 = 1.25 fold
-nrow(PCW3.sub.markers) #792
-
-PCW3.sub.markers <- dplyr::arrange(PCW3.sub.markers, -avg_log2FC)
-PCW3.sub.markers <- dplyr::arrange(PCW3.sub.markers, cluster)
-PCW3.sub.markers %>% group_by(cluster) %>% top_n(n = 2, wt = avg_log2FC)
-top10_combined <- PCW3.sub.markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
-
-setwd("~/Desktop/TBX6 RNA-seq/plots/")
-pdf("PCW3.sub.markers_heatmap_res0.2_smaller.pdf",width = 8, height = 16) 
-DoHeatmap(PCW3.sub, features = top10_combined$gene,
-          raster = F, size = 3,
-          group.by = "cell_type")
-dev.off()
-
-
-################################################################
-##################### Making TBX6 module score #################
-################################################################
-
-
-res_tb <- read.csv(file = "~/Desktop/TBX6 RNA-seq/res_tbx6.csv") #res_tbx6 is res
-
-# Filter by significance & direction
-res_tb_sig <- res_tb %>%
-  as.data.frame() %>%
-  filter(!is.na(padj),
-         padj < 0.05,
-         log2FoldChange > 2) %>%
-  arrange(desc(log2FoldChange))
-
-n_top <- 500
-
-# genes present in the PCW3 object
-pcw_genes <- rownames(PCW3.sub)
-
-tbx6_module_use <- res_tb_sig %>%
-  # drop Ensembl IDs
-  filter(!grepl("^ENS", X)) %>%
-  # keep only genes that exist in PCW3.sub
-  filter(X %in% pcw_genes) %>%
-  # order by effect size
-  arrange(desc(log2FoldChange)) %>%
-  # take up to the top n_top intersecting genes
-  slice_head(n = min(n_top, nrow(.))) %>%
-  pull(X)
-
-length(tbx6_module_use)
-head(tbx6_module_use)
-
-DefaultAssay(PCW3.sub) <- "SCT"  # or "RNA" if you prefer
-
-PCW3.sub <- AddModuleScore(
-  PCW3.sub,
-  features = list(tbx6_module_use),
-  name = "TBX6_module")
-
-
-
-setwd("~/Desktop/TBX6 RNA-seq/plots/")
-pdf("Zeng_TBX6_500module_UMAP.pdf", width = 7, height = 6)
-FeaturePlot(
-  PCW3.sub,
-  features  = "TBX6_module1",
-  reduction = "zeng.umap",
-  cols      = c("grey96", "#313695"),
-  min.cutoff = "q1",
-  max.cutoff = "q99",
-  order      = TRUE,
-  pt.size    = 1)+
-  theme(panel.border = element_rect(colour = "black", fill=NA, size=1), 
-        axis.text.x=element_blank(),
-        axis.ticks.x=element_blank(),
-        axis.text.y=element_blank(),
-        axis.ticks.y=element_blank(),
-        axis.title.x=element_text(hjust = 0, vjust=1),
-        axis.title.y=element_text(hjust = 0, vjust=-0),
-        panel.grid.major = element_blank(),
-        panel.grid.minor = element_blank(),
-        panel.background = element_rect(fill = 'white', colour = 'white'),
-        line = element_blank(),
-        plot.title = element_blank())+labs(title = NULL,x="UMAP 1", y ="UMAP 2")
-dev.off()
-
-
-setwd("~/Desktop/TBX6 RNA-seq/plots/")
-pdf("Zeng_TBX6_expression_UMAP.pdf", width = 7, height = 6)
-FeaturePlot(
-  PCW3.sub,
-  features  = "PAX2",
-  reduction = "zeng.umap",
-  cols      = c("grey96", "#313695"),
-  min.cutoff = "q1",
-  max.cutoff = "q99",
-  order      = TRUE,
-  pt.size    = 1)+
-  theme(panel.border = element_rect(colour = "black", fill=NA, size=1), 
-        axis.text.x=element_blank(),
-        axis.ticks.x=element_blank(),
-        axis.text.y=element_blank(),
-        axis.ticks.y=element_blank(),
-        axis.title.x=element_text(hjust = 0, vjust=1),
-        axis.title.y=element_text(hjust = 0, vjust=-0),
-        panel.grid.major = element_blank(),
-        panel.grid.minor = element_blank(),
-        panel.background = element_rect(fill = 'white', colour = 'white'),
-        line = element_blank(),
-        plot.title = element_blank())+labs(title = NULL,x="UMAP 1", y ="UMAP 2")
-dev.off()
-
-
-#### Plotting cell types using Seurat DimPlot #####
-setwd("~/Desktop/TBX6 RNA-seq/plots/")
-
-p_zeng <- DimPlot(
+DimPlot(
   PCW3.sub,
   reduction = "zeng.umap",
-  group.by  = "cell_type",
-  label     = FALSE,
-  pt.size   = 0.2
+  group.by = "cell_type",
+  label = FALSE,
+  pt.size = 0.2
 ) +
   theme(
-    panel.border     = element_rect(colour = "black", fill = NA, size = 1),
-    axis.text.x      = element_blank(),
-    axis.ticks.x     = element_blank(),
-    axis.text.y      = element_blank(),
-    axis.ticks.y     = element_blank(),
-    axis.title.x     = element_text(hjust = 0, vjust = 1),
-    axis.title.y     = element_text(hjust = 0, vjust = 0),
+    panel.border = element_rect(colour = "black", fill = NA, size = 1),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.title.x = element_text(hjust = 0, vjust = 1),
+    axis.title.y = element_text(hjust = 0, vjust = 0),
     panel.grid.major = element_blank(),
     panel.grid.minor = element_blank(),
     panel.background = element_rect(fill = "white", colour = "white"),
-    line             = element_blank(),
-    plot.title       = element_blank(),
-    legend.position  = "right",
-    legend.box       = "vertical",
-    legend.key.size  = unit(8, "pt"),
-    legend.text      = element_text(size = 7, face = "plain")  ) +
+    line = element_blank(),
+    plot.title = element_blank(),
+    legend.position = "right",
+    legend.box = "vertical",
+    legend.key.size = unit(8, "pt"),
+    legend.text = element_text(size = 7, face = "plain")
+  ) +
   labs(
     title = NULL,
-    x     = "UMAP 1",
-    y     = "UMAP 2"
-  )+
+    x = "UMAP 1",
+    y = "UMAP 2"
+  ) +
   guides(color = guide_legend(
     ncol = 1,
-    override.aes = list(size = 2)  # 🔥 bigger legend dots here
-  ))  # avoids vertical clipping
+    override.aes = list(size = 2)
+  ))
 
-ggsave("Zeng_celltype_labels_lab.png",
-       p_zeng, width = 4, height = 4, dpi = 600, units = "in")
+#### Plotting endogenous TBX6 expression in Zeng dataset - Figure S3K
 
-
-
-
-
-#### Plotting cell types using ggPlot #####
-
-library(ggplot2)
-library(ggrepel)
-library(dplyr)
-library(Seurat)
-
-# 1. Build df with UMAP + cell type
-emb <- Embeddings(PCW3.sub, reduction = "zeng.umap") %>% as.data.frame()
-colnames(emb)[1:2] <- c("UMAP_1", "UMAP_2")
-
-plot_df <- emb %>%
-  mutate(cell_type = PCW3.sub@meta.data$cell_type)
-
-# 2. Cluster centroids (median for robustness)
-label_df <- plot_df %>%
-  group_by(cell_type) %>%
-  summarise(
-    UMAP_1 = median(UMAP_1),
-    UMAP_2 = median(UMAP_2),
-    .groups = "drop"
-  )
-
-# 3. Same colors as Seurat uses
-cell_cols <- Seurat:::DiscretePalette(nlevels(plot_df$cell_type))
-names(cell_cols) <- levels(plot_df$cell_type)
-
-# 4. Plot
-p_umap <- ggplot(plot_df, aes(x = UMAP_1, y = UMAP_2)) +
-  geom_point(aes(color = cell_type), size = 0.4, alpha = 0.8) +
-  geom_text_repel(
-    data = label_df,
-    aes(x = UMAP_1, y = UMAP_2, label = cell_type, color = cell_type),
-    inherit.aes = FALSE,
-    size = 3,
-    fontface = "plain",
-    point.padding = 0.8,
-    box.padding = 0.6,
-    max.overlaps = Inf,
-    segment.color = NA
-  ) +
-  scale_color_manual(values = cell_cols) +
-  theme_bw(base_size = 10) +
+FeaturePlot(
+  PCW3.sub,
+  features = "TBX6",
+  reduction = "zeng.umap",
+  cols = c("grey96", "#313695"),
+  min.cutoff = "q1",
+  max.cutoff = "q99",
+  order = T,
+  pt.size = 1
+) +
   theme(
-    legend.position = "none",
     panel.border = element_rect(colour = "black", fill = NA, size = 1),
-    axis.text  = element_blank(),
-    axis.ticks = element_blank(),
-    panel.grid = element_blank(),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.title.x = element_text(hjust = 0, vjust = 1),
+    axis.title.y = element_text(hjust = 0, vjust = 0),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_rect(fill = "white", colour = "white"),
+    line = element_blank(),
     plot.title = element_blank()
   ) +
-  labs(x = "UMAP 1", y = "UMAP 2")
-
-# 5. Save final image
-ggsave("Zeng_celltype_labels_clean.png",
-       p_umap, width = 6, height = 6, dpi = 300)
-
-
+  labs(title = NULL, x = "UMAP 1", y = "UMAP 2")
 
 
 
 ################################################################
-### Order groups by mean TBX6 module score for Violin Plot ###
+##################### Making TBX6 module score for Zeng ########
 ################################################################
 
-library(dplyr)
-library(Seurat)
+res_tb_sig <- res_tb %>%
+  as.data.frame() %>%
+  dplyr::filter(!is.na(padj), padj < 0.05, log2FoldChange > 2) %>%
+  dplyr::arrange(desc(log2FoldChange))
 
-# 1. Get ordering of groups by mean TBX6 module score
-order_levels <- PCW3.sub@meta.data %>%
-  group_by(cell_type) %>%
-  summarise(mean_TBX6 = mean(TBX6_module1, na.rm = TRUE)) %>%
-  arrange(mean_TBX6) %>%
-  pull(cell_type)
+n_top <- 500
+pcw_genes <- rownames(PCW3.sub)
 
-# 2. Set that order on the metadata column used for group.by
-PCW3.sub@meta.data$cell_type <- factor(
-  PCW3.sub@meta.data$cell_type,
-  levels = order_levels
-)
-
-# 3. Plot, x-axis now ordered from lowest → highest TBX6_module1
-setwd("~/Desktop/TBX6 RNA-seq/plots/")
-pdf("Zeng_TBX6_500module_ordered.pdf", width = 10, height = 6)
-VlnPlot(
-  PCW3.sub,
-  features = "TBX6_module1",
-  group.by = "cell_type",
-  pt.size  = 0.4,
-  log = FALSE)
-dev.off()
+tbx6_module_use <- res_tb_sig %>%
+  dplyr::filter(!grepl("^ENS", X)) %>%
+  dplyr::filter(X %in% pcw_genes) %>%
+  dplyr::arrange(desc(log2FoldChange)) %>%
+  dplyr::slice_head(n = min(n_top, nrow(.))) %>%
+  dplyr::pull(X)
 
 
 
-
-
-
-#############################################################################################################
 #############################################################################################################
 ######################## Checking overlap between Tyser and Zeng TBX6 module scores #########################
 #############################################################################################################
-#############################################################################################################
-#############################################################################################################
 
-# Genes used in Tyser module score
-genes_typer <- tbx6_module_ens  # ENSG IDs
+genes_typer <- tbx6_module_ens
+genes_zeng <- tbx6_module_use
 
-# Genes used in Zeng module score
-genes_zeng <- tbx6_module_use  # HGNC symbols
-
-# Convert Tyser ENSG IDs → HGNC symbols for fair comparison
 tyser_symbols <- conv %>%
-  filter(ensembl_gene_id %in% genes_typer) %>%
-  pull(hgnc_symbol) %>%
+  dplyr::filter(ensembl_gene_id %in% genes_typer) %>%
+  dplyr::pull(hgnc_symbol) %>%
   unique()
 
-# Remove any NA symbols
 tyser_symbols <- tyser_symbols[!is.na(tyser_symbols)]
-
-# Compute intersection
 gene_overlap <- intersect(tyser_symbols, genes_zeng)
 
-# Print results
 cat("Tyser genes:", length(tyser_symbols), "\n")
 cat("Zeng genes:", length(genes_zeng), "\n")
 cat("Overlap:", length(gene_overlap), "\n")
 
-# Optional: show matching genes
 gene_overlap
-
-
 
 ######################################################
 ########## Making a shared TBX6 module score #########
 ######################################################
 
-# 1. Define shared TBX6 module gene set (HGNC symbols)
-shared_tbx6_genes <- sort(gene_overlap) 
-
-length(shared_tbx6_genes)
-head(shared_tbx6_genes)
-
-# 2. For Tyser: convert shared symbols back to Ensembl IDs present in Tyser
-#    assuming `conv` has hgnc_symbol + ensembl_gene_id and Tyser is ENSG-based
+shared_tbx6_genes <- sort(gene_overlap)
 
 shared_tbx6_ensg_tyser <- conv %>%
-  filter(hgnc_symbol %in% shared_tbx6_genes,
-         ensembl_gene_id %in% rownames(Tyser)) %>%
-  pull(ensembl_gene_id) %>%
+  dplyr::filter(
+    hgnc_symbol %in% shared_tbx6_genes,
+    ensembl_gene_id %in% rownames(Tyser)
+  ) %>%
+  dplyr::pull(ensembl_gene_id) %>%
   unique()
-
-length(shared_tbx6_ensg_tyser) #256 genes
 
 Tyser <- AddModuleScore(
   Tyser,
   features = list(shared_tbx6_ensg_tyser),
-  name     = "TBX6_shared"
+  name = "TBX6_shared"
 )
 
-# 3. For Zeng: use the same shared symbols directly (PCW3.sub uses symbols)
 shared_tbx6_zeng <- intersect(shared_tbx6_genes, rownames(PCW3.sub))
-
-length(shared_tbx6_zeng)
 
 PCW3.sub <- AddModuleScore(
   PCW3.sub,
   features = list(shared_tbx6_zeng),
-  name     = "TBX6_shared"
+  name = "TBX6_shared"
 )
 
-# New columns:
-#   Tyser:    TBX6_shared1
-#   PCW3.sub: TBX6_shared1
 
+#### Plotting shared TBX6 module onto Tyser dataset - Figure S3H
 
-
-
-
-
-setwd("~/Desktop/TBX6 RNA-seq/plots/")
-pdf("Tyser_TBX6_500shared1_UMAP.pdf", width = 7, height = 6)
 FeaturePlot(
   Tyser,
-  features  = "TBX6_shared1",
+  features = "TBX6_shared1",
   reduction = "umap",
-  cols      = c("grey96", "#313695"),
+  cols = c("grey96", "#313695"),
   min.cutoff = "q1",
   max.cutoff = "q99",
-  order      = TRUE,
-  pt.size    = 1)+
-  theme(panel.border = element_rect(colour = "black", fill=NA, size=1), 
-        axis.text.x=element_blank(),
-        axis.ticks.x=element_blank(),
-        axis.text.y=element_blank(),
-        axis.ticks.y=element_blank(),
-        axis.title.x=element_text(hjust = 0, vjust=1),
-        axis.title.y=element_text(hjust = 0, vjust=-0),
-        panel.grid.major = element_blank(),
-        panel.grid.minor = element_blank(),
-        panel.background = element_rect(fill = 'white', colour = 'white'),
-        line = element_blank(),
-        plot.title = element_blank())+labs(title = NULL,x="UMAP 1", y ="UMAP 2")
-dev.off()
+  order = TRUE,
+  pt.size = 1
+) +
+  theme(
+    panel.border = element_rect(colour = "black", fill = NA, size = 1),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.title.x = element_text(hjust = 0, vjust = 1),
+    axis.title.y = element_text(hjust = 0, vjust = 0),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_rect(fill = "white", colour = "white"),
+    line = element_blank(),
+    plot.title = element_blank()
+  ) +
+  labs(title = NULL, x = "UMAP 1", y = "UMAP 2")
 
 
+#### Plotting shared TBX6 module onto Zeng dataset - Figure S3L
 
-setwd("~/Desktop/TBX6 RNA-seq/plots/")
-pdf("Zeng_TBX6_500shared1_UMAP.pdf", width = 7, height = 6)
 FeaturePlot(
   PCW3.sub,
-  features  = "TBX6_shared1",
+  features = "TBX6_shared1",
   reduction = "zeng.umap",
-  cols      = c("grey96", "#313695"),
+  cols = c("grey96", "#313695"),
   min.cutoff = "q1",
   max.cutoff = "q99",
-  order      = TRUE,
-  pt.size    = 1)+
-  theme(panel.border = element_rect(colour = "black", fill=NA, size=1), 
-        axis.text.x=element_blank(),
-        axis.ticks.x=element_blank(),
-        axis.text.y=element_blank(),
-        axis.ticks.y=element_blank(),
-        axis.title.x=element_text(hjust = 0, vjust=1),
-        axis.title.y=element_text(hjust = 0, vjust=-0),
-        panel.grid.major = element_blank(),
-        panel.grid.minor = element_blank(),
-        panel.background = element_rect(fill = 'white', colour = 'white'),
-        line = element_blank(),
-        plot.title = element_blank())+labs(title = NULL,x="UMAP 1", y ="UMAP 2")
-dev.off()
-
-
-
-################################################################
-### Order groups by mean TBX6 module score for Violin Plot ###
-################################################################
-
-
-library(dplyr)
-library(Seurat)
-library(ggplot2)
-
-# Re-order by mean module score
-order_levels <- PCW3.sub@meta.data %>%
-  group_by(cell_type) %>%
-  summarise(mean_TBX6 = mean(TBX6_shared1, na.rm = TRUE)) %>%
-  arrange(mean_TBX6) %>%
-  pull(cell_type)
-
-PCW3.sub@meta.data$cell_type <- factor(
-  PCW3.sub@meta.data$cell_type,
-  levels = order_levels
-)
-
-# Matched-style violin plot
-p_zeng_pub <- VlnPlot(
-  PCW3.sub,
-  features = "TBX6_shared1",
-  group.by = "cell_type",
-  pt.size = 0,
-  log = FALSE
+  order = TRUE,
+  pt.size = 1
 ) +
-  geom_boxplot(width = 0.12, outlier.shape = NA,
-               fill = "white", size = 0.3) +
-  coord_flip() +
-  labs(
-    x = "Cell type",
-    y = "TBX6 module score"
-  ) +
-  theme_bw(base_size = 10) +
   theme(
-    plot.title   = element_blank(),
-    axis.text.y  = element_text(size = 9),
-    axis.text.x  = element_text(size = 9),
-    axis.title.x = element_text(size = 10),
-    axis.title.y = element_text(size = 10),
-    panel.grid.major.x = element_line(colour = "grey90", size = 0.3),
-    panel.grid.major.y = element_blank(),
-    panel.grid.minor   = element_blank(),
-    legend.position = "none",
-    strip.background = element_rect(fill = "grey95", colour = NA),
-    strip.text       = element_text(size = 9),
-    plot.margin      = margin(5, 10, 5, 10, "pt")
-  )
-
-# Save using same plotting directory + DPI
-ggsave("Zeng_TBX6_500shared1_ordered_matched.png",
-       plot = p_zeng_pub,
-       width = 5, height = 3, units = "in",
-       dpi = 300)
-
-
+    panel.border = element_rect(colour = "black", fill = NA, size = 1),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.title.x = element_text(hjust = 0, vjust = 1),
+    axis.title.y = element_text(hjust = 0, vjust = 0),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_rect(fill = "white", colour = "white"),
+    line = element_blank(),
+    plot.title = element_blank()
+  ) +
+  labs(title = NULL, x = "UMAP 1", y = "UMAP 2")
 
 
 ################################################################
-### Order groups by mean TBX6 module score for Violin Plot ###
+### Order groups by mean shared TBX6 module score ##############
 ################################################################
 
 
-library(dplyr)
-library(Seurat)
-library(ggplot2)
+## Tyser
 
-## Order groups by mean score
 order_levels <- Tyser@meta.data %>%
-  group_by(inferred_cell_type_._authors_labels) %>%
-  summarise(mean_TBX6 = mean(TBX6_shared1, na.rm = TRUE)) %>%
-  arrange(mean_TBX6) %>%
-  pull(inferred_cell_type_._authors_labels)
+  dplyr::group_by(inferred_cell_type_._authors_labels) %>%
+  dplyr::summarise(mean_TBX6 = mean(TBX6_shared1, na.rm = TRUE)) %>%
+  dplyr::arrange(mean_TBX6) %>%
+  dplyr::pull(inferred_cell_type_._authors_labels)
 
 Tyser@meta.data$inferred_cell_type_._authors_labels <- factor(
   Tyser@meta.data$inferred_cell_type_._authors_labels,
   levels = order_levels
 )
 
-## Matched-style plot WITH coord_flip()
-p_tbx6_pub <- VlnPlot(
+#### Violin plots of module score by cluster - Figure S3I
+
+VlnPlot(
   Tyser,
   features = "TBX6_shared1",
   group.by = "inferred_cell_type_._authors_labels",
@@ -1359,32 +826,68 @@ p_tbx6_pub <- VlnPlot(
     fill = "white",
     size = 0.3
   ) +
-  coord_flip() +   # <-- CRITICAL to match Zeng
+  coord_flip() +
   labs(
     y = "TBX6 module score",
     x = NULL
   ) +
   theme_bw(base_size = 10) +
   theme(
-    plot.title   = element_blank(),
-    axis.text.y  = element_text(size = 9),
-    axis.text.x  = element_text(size = 9),
+    plot.title = element_blank(),
+    axis.text.y = element_text(size = 9),
+    axis.text.x = element_text(size = 9),
     axis.title.y = element_text(size = 10),
     panel.grid.major.x = element_line(colour = "grey90", size = 0.3),
     panel.grid.major.y = element_blank(),
-    panel.grid.minor   = element_blank(),
+    panel.grid.minor = element_blank(),
     legend.position = "none",
     strip.background = element_rect(fill = "grey95", colour = NA),
-    strip.text       = element_text(size = 9),
-    plot.margin      = margin(5, 10, 5, 10, "pt")
+    strip.text = element_text(size = 9),
+    plot.margin = margin(5, 10, 5, 10, "pt")
   )
 
-ggsave(
-  filename = "Tyser_TBX6_500shared1_ordered_matched_vertical.png",
-  plot = p_tbx6_pub,
-  width = 5, height = 3, units = "in",
-  dpi = 300
+
+
+## Zeng
+
+order_levels <- PCW3.sub@meta.data %>%
+  dplyr::group_by(cell_type) %>%
+  dplyr::summarise(mean_TBX6 = mean(TBX6_shared1, na.rm = TRUE)) %>%
+  dplyr::arrange(mean_TBX6) %>%
+  dplyr::pull(cell_type)
+
+PCW3.sub@meta.data$cell_type <- factor(
+  PCW3.sub@meta.data$cell_type,
+  levels = order_levels
 )
 
+#### Violin plots of module score by cluster - Figure S3M
 
-
+VlnPlot(
+  PCW3.sub,
+  features = "TBX6_shared1",
+  group.by = "cell_type",
+  pt.size = 0,
+  log = FALSE
+) +
+  geom_boxplot(width = 0.12, outlier.shape = NA, fill = "white", size = 0.3) +
+  coord_flip() +
+  labs(
+    x = "Cell type",
+    y = "TBX6 module score"
+  ) +
+  theme_bw(base_size = 10) +
+  theme(
+    plot.title = element_blank(),
+    axis.text.y = element_text(size = 9),
+    axis.text.x = element_text(size = 9),
+    axis.title.x = element_text(size = 10),
+    axis.title.y = element_text(size = 10),
+    panel.grid.major.x = element_line(colour = "grey90", size = 0.3),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    legend.position = "none",
+    strip.background = element_rect(fill = "grey95", colour = NA),
+    strip.text = element_text(size = 9),
+    plot.margin = margin(5, 10, 5, 10, "pt")
+  )
