@@ -1,0 +1,356 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+###############################################################################
+# HOMER motif enrichment analysis in FOXC-associated early somite ATAC peaks
+#
+# Purpose:
+#   1. Build hg19 TSS annotation from UCSC refGene
+#   2. Create TSS ±50 kb windows for:
+#        - FOXC-downregulated genes (target gene set)
+#        - background genes (expressed/unchanged gene set)
+#   3. Intersect early somite ATAC peaks with these windows
+#   4. Run HOMER motif enrichment:
+#        findMotifsGenome.pl targetPeaks hg19.fa outdir -bg backgroundPeaks
+#
+# Inputs:
+#   - hg19 FASTA
+#   - hg19 chrom sizes
+#   - UCSC refGene table
+#   - early somite ATAC narrowPeak
+#   - FOXC-down gene list
+#   - background gene list
+#
+# Outputs:
+#   - hg19 TSS BED files
+#   - FOXC-down and background TSS ±50 kb windows
+#   - target/background peak subsets
+#   - HOMER motif enrichment results
+#
+# Notes:
+#   - This script uses a custom hg19 FASTA, not HOMER-installed hg19.
+#   - Peak IDs are rewritten to unique names before running HOMER.
+#   - Background is defined as ATAC peaks overlapping TSS ±50 kb of the
+#     background gene set, which is preferable to using all peaks.
+#   - HOMER output directories are timestamped to prevent overwriting.
+###############################################################################
+
+########################################
+# User-configurable paths
+########################################
+
+BASE="/Users/jaypea/Desktop/Loh_mesoderm"
+
+GENOME_DIR="$BASE/genomes/hg19"
+GENOME_FA="$GENOME_DIR/hg19.fa"
+CHROM_SIZES="$GENOME_DIR/hg19.chrom.sizes"
+REFGENE_TXT="$GENOME_DIR/refGene.txt"
+
+EARLY_PEAKS_RAW="$BASE/loh_early_somite/peaks/GSM2257295_ATAC13+14_IDR.narrowPeak"
+
+GENE_DIR="$BASE/FOXC_ATAC/genes"
+FOXC_GENE_LIST="$GENE_DIR/foxc_down_genes.txt"
+BACKGROUND_GENE_LIST="$GENE_DIR/background_genes.txt"
+
+RESULTS_DIR="$BASE/loh_early_somite/results"
+HOMER_BASE="$BASE/loh_early_somite/homer"
+
+# Timestamped run name to prevent overwriting previous HOMER analyses
+TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
+RUN_NAME="FOXC_TSSpm50kb_bgExpressedUnchanged"
+OUTDIR="$HOMER_BASE/${RUN_NAME}_${TIMESTAMP}"
+
+FLANK=50000
+THREADS=8
+
+########################################
+# Derived output files
+########################################
+
+TSS_ALL="$GENOME_DIR/hg19.refGene.TSS.bed"
+TSS_UNIQUE="$GENOME_DIR/hg19.refGene.TSS.uniqueByGene.bed"
+
+FOXC_TSS="$GENE_DIR/FOXC_down.hg19.TSS.bed"
+FOXC_WINDOWS="$GENE_DIR/FOXC_down.hg19.TSSpm50kb.bed"
+
+BG_TSS="$GENE_DIR/background.hg19.TSS.bed"
+BG_WINDOWS="$GENE_DIR/background.hg19.TSSpm50kb.bed"
+
+TARGET_PEAKS_RAW="$RESULTS_DIR/earlySomite.FOXCwindow.peaks.narrowPeak"
+BG_PEAKS_RAW="$RESULTS_DIR/earlySomite.backgroundGenes.peaks.narrowPeak"
+
+TARGET_PEAKS="$RESULTS_DIR/earlySomite.FOXCwindow.peaks.uniqueIDs.narrowPeak"
+BG_PEAKS="$RESULTS_DIR/earlySomite.backgroundGenes.peaks.uniqueIDs.narrowPeak"
+
+RUN_MANIFEST="$OUTDIR/run_manifest.txt"
+
+########################################
+# Helper functions
+########################################
+
+log() {
+  echo "[INFO] $*"
+}
+
+die() {
+  echo "[ERROR] $*" >&2
+  exit 1
+}
+
+check_file() {
+  local f="$1"
+  [[ -s "$f" ]] || die "Required file missing or empty: $f"
+}
+
+require_tool() {
+  command -v "$1" >/dev/null 2>&1 || die "Required tool not found in PATH: $1"
+}
+
+make_unique_peak_ids() {
+  local in_bed="$1"
+  local out_bed="$2"
+  awk 'BEGIN{OFS="\t"}
+       {
+         name = "peak_" NR
+         score = ($5 == "" ? 0 : $5)
+         strand = ($6 == "" ? "." : $6)
+         signal = ($7 == "" ? 0 : $7)
+         pval = ($8 == "" ? 0 : $8)
+         qval = ($9 == "" ? 0 : $9)
+         summit = ($10 == "" ? -1 : $10)
+         print $1, $2, $3, name, score, strand, signal, pval, qval, summit
+       }' "$in_bed" > "$out_bed"
+}
+
+########################################
+# Initial checks
+########################################
+
+log "Checking required tools"
+require_tool bedtools
+require_tool findMotifsGenome.pl
+require_tool awk
+require_tool grep
+require_tool sort
+require_tool wc
+require_tool head
+require_tool date
+
+mkdir -p "$GENOME_DIR" "$GENE_DIR" "$RESULTS_DIR" "$HOMER_BASE"
+
+# Safety check: timestamped OUTDIR should be unique
+if [[ -e "$OUTDIR" ]]; then
+  die "Output directory already exists: $OUTDIR"
+fi
+
+mkdir -p "$OUTDIR"
+
+log "Run name:         $RUN_NAME"
+log "Timestamp:        $TIMESTAMP"
+log "HOMER output dir: $OUTDIR"
+
+log "Checking required input files"
+check_file "$GENOME_FA"
+check_file "$CHROM_SIZES"
+check_file "$REFGENE_TXT"
+check_file "$EARLY_PEAKS_RAW"
+check_file "$FOXC_GENE_LIST"
+check_file "$BACKGROUND_GENE_LIST"
+
+########################################
+# Write run manifest
+########################################
+
+cat > "$RUN_MANIFEST" <<EOF
+run_name	$RUN_NAME
+timestamp	$TIMESTAMP
+base	$BASE
+genome_fasta	$GENOME_FA
+chrom_sizes	$CHROM_SIZES
+refgene_txt	$REFGENE_TXT
+early_peaks_raw	$EARLY_PEAKS_RAW
+foxc_gene_list	$FOXC_GENE_LIST
+background_gene_list	$BACKGROUND_GENE_LIST
+results_dir	$RESULTS_DIR
+homer_base	$HOMER_BASE
+outdir	$OUTDIR
+flank_bp	$FLANK
+threads	$THREADS
+EOF
+
+########################################
+# 1) Build hg19 TSS BED from refGene
+########################################
+
+log "Building hg19 TSS BED from refGene"
+
+awk 'BEGIN{OFS="\t"}
+     $3 ~ /^chr/ {
+       chrom  = $3
+       strand = $4
+       txStart = $5
+       txEnd   = $6
+       gene    = $13
+
+       if (strand == "+") {
+         tss = txStart
+       } else {
+         tss = txEnd - 1
+       }
+
+       if (tss < 0) next
+       print chrom, tss, tss + 1, gene, 0, strand
+     }' "$REFGENE_TXT" \
+  | sort -k1,1 -k2,2n > "$TSS_ALL"
+
+log "Keeping first TSS per gene symbol for reproducibility"
+awk 'BEGIN{OFS="\t"} !seen[$4]++ {print}' "$TSS_ALL" > "$TSS_UNIQUE"
+
+check_file "$TSS_UNIQUE"
+
+log "Total unique gene TSS entries:"
+wc -l "$TSS_UNIQUE"
+
+########################################
+# 2) Build FOXC-down TSS ±50 kb windows
+########################################
+
+log "Creating FOXC-down TSS BED"
+grep -F -w -f "$FOXC_GENE_LIST" "$TSS_UNIQUE" \
+  | sort -k1,1 -k2,2n > "$FOXC_TSS"
+
+check_file "$FOXC_TSS"
+
+log "Expanding FOXC-down TSS to ±${FLANK} bp"
+bedtools slop \
+  -i "$FOXC_TSS" \
+  -g "$CHROM_SIZES" \
+  -b "$FLANK" \
+  > "$FOXC_WINDOWS"
+
+check_file "$FOXC_WINDOWS"
+
+log "FOXC-down genes found in TSS table:"
+wc -l "$FOXC_TSS"
+
+########################################
+# 3) Build background-gene TSS ±50 kb windows
+########################################
+
+log "Creating background-gene TSS BED"
+grep -F -w -f "$BACKGROUND_GENE_LIST" "$TSS_UNIQUE" \
+  | sort -k1,1 -k2,2n > "$BG_TSS"
+
+check_file "$BG_TSS"
+
+log "Expanding background-gene TSS to ±${FLANK} bp"
+bedtools slop \
+  -i "$BG_TSS" \
+  -g "$CHROM_SIZES" \
+  -b "$FLANK" \
+  > "$BG_WINDOWS"
+
+check_file "$BG_WINDOWS"
+
+log "Background genes found in TSS table:"
+wc -l "$BG_TSS"
+
+########################################
+# 4) Intersect early somite ATAC peaks with windows
+########################################
+
+log "Selecting early somite peaks overlapping FOXC-down gene windows"
+bedtools intersect -u \
+  -a "$EARLY_PEAKS_RAW" \
+  -b "$FOXC_WINDOWS" \
+  > "$TARGET_PEAKS_RAW"
+
+check_file "$TARGET_PEAKS_RAW"
+
+log "Selecting early somite peaks overlapping background-gene windows"
+bedtools intersect -u \
+  -a "$EARLY_PEAKS_RAW" \
+  -b "$BG_WINDOWS" \
+  > "$BG_PEAKS_RAW"
+
+check_file "$BG_PEAKS_RAW"
+
+log "Target peak count:"
+wc -l "$TARGET_PEAKS_RAW"
+
+log "Background peak count:"
+wc -l "$BG_PEAKS_RAW"
+
+########################################
+# 5) Rewrite peaks with unique IDs for HOMER
+########################################
+
+log "Rewriting target peaks with unique IDs"
+make_unique_peak_ids "$TARGET_PEAKS_RAW" "$TARGET_PEAKS"
+
+log "Rewriting background peaks with unique IDs"
+make_unique_peak_ids "$BG_PEAKS_RAW" "$BG_PEAKS"
+
+check_file "$TARGET_PEAKS"
+check_file "$BG_PEAKS"
+
+log "Preview target peaks:"
+head -n 3 "$TARGET_PEAKS"
+
+log "Preview background peaks:"
+head -n 3 "$BG_PEAKS"
+
+########################################
+# 6) Run HOMER motif enrichment
+########################################
+
+log "Running HOMER motif enrichment"
+log "Target peaks:     $TARGET_PEAKS"
+log "Background peaks: $BG_PEAKS"
+log "Genome FASTA:     $GENOME_FA"
+log "Output dir:       $OUTDIR"
+
+findMotifsGenome.pl \
+  "$TARGET_PEAKS" \
+  "$GENOME_FA" \
+  "$OUTDIR" \
+  -bg "$BG_PEAKS" \
+  -size given \
+  -mask \
+  -p "$THREADS"
+
+########################################
+# 7) Final QC / outputs
+########################################
+
+log "HOMER analysis complete"
+
+if [[ -s "$OUTDIR/knownResults.txt" ]]; then
+  log "Top known motif results:"
+  head -n 20 "$OUTDIR/knownResults.txt"
+else
+  log "knownResults.txt not found"
+fi
+
+if [[ -f "$OUTDIR/homerResults.html" ]]; then
+  log "De novo motif HTML: $OUTDIR/homerResults.html"
+fi
+
+if [[ -f "$OUTDIR/knownResults.html" ]]; then
+  log "Known motif HTML: $OUTDIR/knownResults.html"
+fi
+
+echo
+log "Final files:"
+echo "  Run manifest:             $RUN_MANIFEST"
+echo "  All TSS BED:              $TSS_ALL"
+echo "  Unique-by-gene TSS BED:   $TSS_UNIQUE"
+echo "  FOXC TSS BED:             $FOXC_TSS"
+echo "  FOXC TSS ±50kb BED:       $FOXC_WINDOWS"
+echo "  Background TSS BED:       $BG_TSS"
+echo "  Background TSS ±50kb BED: $BG_WINDOWS"
+echo "  Target peaks raw:         $TARGET_PEAKS_RAW"
+echo "  Background peaks raw:     $BG_PEAKS_RAW"
+echo "  Target peaks unique IDs:  $TARGET_PEAKS"
+echo "  Background peaks IDs:     $BG_PEAKS"
+echo "  HOMER output dir:         $OUTDIR"
