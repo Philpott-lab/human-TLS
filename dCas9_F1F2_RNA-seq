@@ -1,0 +1,1200 @@
+library(DESeq2)
+library(ggplot2)
+library(ggrepel)
+library(dplyr)
+library(tibble)
+library(tidyr)
+library(readxl)
+library(pheatmap)
+library(RColorBrewer)
+library(grid)
+library(clusterProfiler)
+library(enrichplot)
+library(stringr)
+library(purrr)
+library(scales)
+library(future)
+
+palette(brewer.pal(8, "Dark2"))
+
+plan()
+plan("sequential")
+plan("multisession", workers = 1) ### Use this to parallelize
+
+#Increasing max size to 4GB
+options(future.globals.maxSize = 8000 * 1024^2)
+
+#Import counts matrix
+dCas9F1F2_matrix <- read.delim2(file = "~/Desktop/dCas9F1F2 RNA-seq/VMF5S2_results/VMF5S2-expression-matrix.csv", header = TRUE, sep=",", stringsAsFactors = F)
+
+#Fill in blank spaces in "gene name" with the corresponding ENS id. Also give identical gene names a unique suffix
+dCas9F1F2_matrix <- dCas9F1F2_matrix %>%
+  mutate(gene_name = ifelse(gene_name == "" | is.na(gene_name), gene_id, gene_name))
+dCas9F1F2_matrix$gene_name <- make.unique(dCas9F1F2_matrix$gene_name, sep=".")
+rownames(dCas9F1F2_matrix) <- dCas9F1F2_matrix$gene_name
+dCas9F1F2_matrix <- dCas9F1F2_matrix[, c(-1, -2, -3)]
+
+head(dCas9F1F2_matrix)
+
+
+library(dplyr)
+library(tibble)
+
+dCas9F1F2_counts <- dCas9F1F2_matrix %>%
+  tibble::as_tibble(rownames = "gene") %>%
+  dplyr::select(gene, dplyr::contains("count")) %>%
+  dplyr::mutate(across(dplyr::contains("count"),
+                       ~ suppressWarnings(as.numeric(.))))
+
+# Convert to data.frame and move gene to rownames
+dCas9F1F2_counts_df <- dCas9F1F2_counts %>%
+  column_to_rownames("gene") %>%
+  as.data.frame()
+
+# Convert tibble → data.frame and set rownames
+dCas9F1F2_counts_df <- dCas9F1F2_counts %>%
+  column_to_rownames("gene") %>%
+  as.data.frame()
+
+# Round → numeric matrix
+dCas9F1F2_counts_mat <- round(as.matrix(dCas9F1F2_counts_df))
+
+# Ensure integer storage (required by DESeq2)
+storage.mode(dCas9F1F2_counts_mat) <- "integer"
+
+dCas9F1F2_counts_mat <- dCas9F1F2_counts_mat[, c(1,3,5,2,4,6)]
+
+# Quick checks
+str(dCas9F1F2_counts_mat)
+head(dCas9F1F2_counts_mat)
+
+count_mat <- dCas9F1F2_counts_mat
+
+#Create metadata table
+metaData <- data.frame(colnames(count_mat))
+metaData$treatment <- c("untreated", "untreated", "untreated", "dox", "dox", "dox")
+
+ncol(count_mat) #6
+nrow(metaData) #6
+
+rownames(metaData) <- metaData$colnames.count_mat.
+metaData$colnames.count_mat. <- NULL
+
+metaData$treatment <- factor(metaData$treatment)
+metaData$treatment <- relevel(metaData$treatment, ref = "untreated")
+
+# sanity check
+sum(is.na(count_mat))             # should be 0
+str(count_mat)
+head(count_mat)
+all(rownames(metaData) == colnames(count_mat))
+
+# Make sure metaData rows are in same order as count_mat columns
+all(rownames(metaData) == colnames(count_mat))
+# if FALSE:
+metaData <- metaData[colnames(count_mat), , drop = FALSE]
+
+dds <- DESeqDataSetFromMatrix(
+  countData = count_mat,
+  colData   = metaData,
+  design    = ~ treatment)
+
+#Run DESeq2
+dds <- DESeq(dds)
+
+#Isolate results
+res <- results(dds)
+head(results(dds, tidy=TRUE)) 
+res <- res[order(res$padj),]
+
+
+#vst function will perform variance stabilizing transformation
+vsdata <- vst(dds, blind=FALSE)
+
+
+##############################################
+########### PCA plots  - Figure S5D ##########
+##############################################
+
+group_cols <- c(
+  "untreated" = "#5B7FA4",  
+  "dox"       = "#E4302A"   )
+
+plotPCA(vsdata, intgroup="treatment", pcsToUse = 1:2) + ggplot2::xlim(-10, 10)+ggplot2::ylim(-4, 4)+
+  scale_colour_manual(values = group_cols) +
+  theme(
+    panel.border = element_rect(colour = "black", fill = NA, size = 1),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_rect(fill = 'white', colour = 'white'),
+    line = element_blank(),
+    axis.title = element_text(size = 15),
+    axis.text = element_text(size = 15)) 
+
+
+###############################################
+######## Correlation Matrix - Figure S5E ######
+###############################################
+
+vsd_mat <- assay(vsdata)
+
+# Compute the pairwise correlation values
+sample_cor_matrix <- cor(vsd_mat)
+
+# View the top-left of the matrix
+head(sample_cor_matrix)
+
+library(pheatmap)
+library(RColorBrewer)
+library(grid)
+
+# 1) Single-hue palette
+corr_colors <- colorRampPalette(c("white", "#005824"))(100)
+
+# 2) Annotation colors
+ann_colors <- list(
+  treatment = c(
+    "untreated" = "#5B7FA4",  
+    "dox"       = "#E4302A" 
+  )
+)
+
+# 3) Make the pheatmap object with shorter trees
+ph <- pheatmap(
+  sample_cor_matrix,
+  annotation_col           = metaData,
+  annotation_colors        = ann_colors,
+  color                    = corr_colors,
+  clustering_distance_rows = "correlation",
+  clustering_distance_cols = "correlation",
+  clustering_method        = "complete",
+  border_color             = NA,
+  show_rownames            = FALSE,
+  show_colnames            = FALSE,
+  fontsize                 = 9,
+  fontsize_annotation_col  = 9,
+  main                     = "",
+  legend                   = TRUE,
+  legend_breaks            = c(0, 0.5, 1),
+  legend_labels            = c("0", "0.5", "1"),
+  treeheight_row           = 2,   # ↓ shorter dendrogram
+  treeheight_col           = 2,   # ↓ shorter dendrogram
+  cellwidth                = 10,   # equal cell size → more square matrix
+  cellheight               = 10)
+
+
+
+##################################################################
+##################### Volcano plot - Figure 5E ###################
+##################################################################
+
+res_frame <- data.frame(res)
+res_frame$log2FoldChange <- as.numeric(res_frame$log2FoldChange)
+res_frame$gene_name <- as.character(rownames(res_frame))
+res_sub <- subset(res_frame, res_frame$log2FoldChange > 2)
+
+top100 <- res_sub$gene_name[1:100]
+
+library(dplyr)
+library(ggplot2)
+library(ggrepel)
+
+gene_list <- c(
+  "RIPPLY1","SIX1","FOXC1","FOXC2","MEOX1","MEOX2","TCF15","PAX3","OSR1","HAND1",
+  "NPHS1","NPHS2","EYA2","PAX2","EPCAM","CDH1","CDH6","TWIST1","JAG1","HEYL","HES5", "MYMX", "MYH11", "MYBPC2", "MYLK3", "MYH7B", "MYOF")
+
+
+res_frame <- res_frame %>%
+  filter(!is.na(padj) & !is.na(log2FoldChange)) %>%
+  mutate(
+    negLog10p = -log10(padj),
+    significance = case_when(
+      padj < 0.05 & log2FoldChange >  0.58 ~ "Significant up",
+      padj < 0.05 & log2FoldChange < -0.58 ~ "Significant down",
+      TRUE                                 ~ "Not significant"
+    ),
+    is_labelled = gene_name %in% gene_list,
+    label_dir = case_when(
+      is_labelled & log2FoldChange >  0.58 ~ "Label up",
+      is_labelled & log2FoldChange < -0.58 ~ "Label down",
+      TRUE                                 ~ NA_character_
+    )
+  )
+
+# cap infinite -log10(FDR)
+max_finite <- max(res_frame$negLog10p[is.finite(res_frame$negLog10p)])
+res_frame$negLog10p[is.infinite(res_frame$negLog10p)] <- max_finite + 1
+
+nrow(res_frame[res_frame$significance == "Significant up",]) #554
+nrow(res_frame[res_frame$significance == "Significant down",]) #554
+nrow(res_frame[res_frame$significance == "Not significant",]) #16043
+
+res_frame_up <- res_frame[res_frame$log2FoldChange>0,]
+
+
+# build plot
+ggplot(res_frame, aes(x = log2FoldChange, y = negLog10p)) +
+  # base layer: all points
+  geom_point(aes(color = significance), size = 0.6, alpha = 1) +
+  # highlight labelled significant genes
+  geom_point(
+    data = subset(res_frame, !is.na(label_dir)),
+    aes(color = label_dir),
+    size = 1
+  ) +
+  scale_color_manual(values = c(
+    "Not significant"  = "grey90",
+    "Significant up"   = "#f7c2ac",
+    "Significant down" = "#92c5de",
+    "Label up"         = "#c90422",
+    "Label down"       = "#096fad"
+  )) +
+  labs(
+    x = "log2 fold change",
+    y = expression(-log[10](FDR)),
+    color = NULL,
+    title = ""
+  ) +
+  theme(
+    panel.border = element_rect(colour = "black", fill = NA, size = 1),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_rect(fill = 'white', colour = 'white'),
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 16),
+    legend.position = "none"
+  ) + scale_y_continuous(
+    trans = scales::pseudo_log_trans(base = 10),
+    limits = c(0, max_finite + 1),  # adjust lower bound so nothing goes negative
+    breaks = c(1, 10, 50, 100, 150),  # you can tune these
+    labels = scales::comma
+  ) +
+  scale_x_continuous(limits = c(-4, 4)) +
+  geom_text_repel(
+    data = subset(res_frame, gene_name %in% gene_list),
+    aes(label = gene_name),
+    color = "black",
+    box.padding = 0.5,
+    point.padding = 0.6,
+    segment.color = "grey80",
+    segment.size = 0.2,
+    size = 4,
+    max.overlaps = 100
+  )
+
+
+
+##############################################
+##############################################
+######## BOXPLOT OF INTERESTING GENES ######## 
+##############################################
+##############################################
+
+library(DESeq2)
+library(tidyverse)
+
+markers <- c(
+  # Down (Somite/Sclerotome)
+  "RIPPLY1", "FOXC1", "FOXC2", "MEOX1","MEOX2", "TCF15", "TWIST1", "SIX1","PAX3",
+  # Up (Kidney/Muscle)
+  "NPHS1", "NPHS2", "EYA2", "OSR1", "EPCAM", "CDH1", "JAG1","HEYL","HES5", "MYMX", "MYH11", "MYBPC2", "MYLK3", "MYH7B", "MYOF"
+)
+
+
+
+somite_markers <- c("TBX6", "MSGN1", "TBXT", "CDX2", "RIPPLY1", "FOXC1", "FOXC2", "MEOX1","MEOX2", "TCF15", "TWIST1", "SIX1","PAX3")
+kidney_markers <- c("NPHS1", "NPHS2", "EYA2", "OSR1", "EPCAM", "CDH1", "CDH6","JAG1","HEYL","HES5", "LHX1")
+muscle_markers <- c("MYMX", "MYH11", "MYBPC2", "MYLK3", "MYH7B", "MYOF")
+
+# Extract normalized counts
+norm_counts <- counts(dds, normalized = TRUE) %>%
+  as.data.frame() %>%
+  rownames_to_column("gene") %>%
+  filter(gene %in% markers) %>%
+  pivot_longer(-gene, names_to = "sample", values_to = "counts")
+
+# Add metadata
+norm_counts <- norm_counts %>%
+  left_join(
+    as.data.frame(colData(dds)) %>%
+      rownames_to_column("sample") %>%
+      dplyr::select(sample, treatment),
+    by = "sample"
+  ) %>%
+  mutate(
+    treatment = factor(treatment),
+    gene      = factor(gene, levels = markers)   # enforce gene order
+  )
+
+# use your DESeq2 results table name
+res_use <- res_frame  # or `res` if that’s your object
+
+sig_table <- res_use %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column("gene") %>%
+  dplyr::filter(gene %in% markers) %>%
+  dplyr::select(gene, padj) %>%
+  dplyr::mutate(
+    sig = dplyr::case_when(
+      padj < 0.001 ~ "***",
+      padj < 0.01  ~ "**",
+      padj < 0.05  ~ "*",
+      TRUE         ~ ""
+    )
+  )
+
+norm_counts2 <- norm_counts %>%
+  dplyr::group_by(gene) %>%
+  dplyr::mutate(
+    max_y = max(counts, na.rm = TRUE) * 1.5
+  ) %>%
+  dplyr::ungroup() %>%
+  dplyr::left_join(sig_table, by = "gene") %>%
+  dplyr::mutate(
+    fill_group = dplyr::case_when(
+      treatment != "dox" ~ "untreated",
+      treatment == "dox" & gene %in% somite_markers ~ "somite genes down with dox",
+      treatment == "dox" & gene %in% kidney_markers ~ "kidney genes up with dox",
+      treatment == "dox" & gene %in% muscle_markers ~ "muscle genes up with dox",
+      TRUE ~ NA_character_
+    ),
+    gene = factor(gene, levels = markers)
+  )
+
+norm_counts2_sub <- norm_counts2[norm_counts2$gene == c("TBX6", "MSGN1"),]
+
+# Plot
+ggplot(norm_counts2, aes(x = gene, y = counts)) +
+  geom_boxplot(
+    aes(fill = fill_group, group = interaction(gene, treatment)),
+    outlier.shape = NA,
+    alpha = 0.6,
+    colour = NA
+  ) +
+  geom_jitter(
+    aes(color = fill_group),
+    width  = 0.15,
+    size   = 2,
+    alpha  = 0.9
+  ) +
+  geom_text(
+    aes(y = max_y, label = sig),
+    size     = 4,
+    vjust    = -0.2
+  ) +
+  scale_y_log10()+
+  coord_cartesian(ylim = c(NA, 20000))+
+  scale_fill_manual(
+    values = c(
+      "untreated" = "#4D4D4D",                     # grey
+      "somite genes down with dox" = "#0072B2",     # blue
+      "kidney genes up with dox" = "#D55E00",       # orange
+      "muscle genes up with dox" = "#CC0000"        # RED
+    ),
+    na.translate = FALSE
+  ) +
+  scale_color_manual(
+    values = c(
+      "untreated" = "#4D4D4D",
+      "somite genes down with dox" = "#0072B2",
+      "kidney genes up with dox" = "#D55E00",
+      "muscle genes up with dox" = "#CC0000"
+    ),
+    na.translate = FALSE
+  ) +
+  labs(
+    y = "Normalized expression (log10 scale)",
+    x = NULL
+  ) +
+  theme_bw(base_size = 10) +
+  theme(
+    axis.text.y  = element_text(size = 8.5, hjust = 1),
+    axis.text.x  = element_text(size = 9, face = "italic", angle = 45, hjust = 1),
+    axis.title.x = element_text(size = 10),
+    panel.grid.major.x = element_line(colour = "grey95"),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor   = element_blank(),
+    legend.title    = element_blank(),
+    legend.text     = element_text(size = 8),
+    legend.key      = element_blank(),
+    legend.position = "right",
+    plot.margin     = margin(5, 10, 5, 20, "pt")
+  )
+
+
+##############################################
+##############################################
+######## BOXPLOT OF EARLY MESODERMAL GENES ###
+##############################################
+##############################################
+
+
+library(DESeq2)
+library(tidyverse)
+
+markers <- c(
+  # Down (Somite/Sclerotome)
+  "TBXT", "CDX2", "TBX6", "MSGN1")
+
+earlymes_markers <- c("TBXT", "CDX2", "TBX6", "MSGN1")
+
+# Extract normalized counts
+norm_counts <- counts(dds, normalized = TRUE) %>%
+  as.data.frame() %>%
+  rownames_to_column("gene") %>%
+  filter(gene %in% markers) %>%
+  pivot_longer(-gene, names_to = "sample", values_to = "counts")
+
+# Add metadata
+norm_counts <- norm_counts %>%
+  left_join(
+    as.data.frame(colData(dds)) %>%
+      rownames_to_column("sample") %>%
+      dplyr::select(sample, treatment),
+    by = "sample"
+  ) %>%
+  mutate(
+    treatment = factor(treatment),
+    gene      = factor(gene, levels = markers)   # enforce gene order
+  )
+
+# use your DESeq2 results table name
+res_use <- res_frame  # or `res` if that’s your object
+
+sig_table <- res_use %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column("gene") %>%
+  dplyr::filter(gene %in% markers) %>%
+  dplyr::select(gene, padj) %>%
+  dplyr::mutate(
+    sig = dplyr::case_when(
+      padj < 0.001 ~ "***",
+      padj < 0.01  ~ "**",
+      padj < 0.05  ~ "*",
+      TRUE         ~ ""
+    )
+  )
+
+norm_counts2 <- norm_counts %>%
+  dplyr::group_by(gene) %>%
+  dplyr::mutate(
+    max_y = max(counts, na.rm = TRUE) * 1.5
+  ) %>%
+  dplyr::ungroup() %>%
+  dplyr::left_join(sig_table, by = "gene") %>%
+  dplyr::mutate(
+    fill_group = dplyr::case_when(
+      treatment != "dox" ~ "untreated",
+      treatment == "dox" & gene %in% earlymes_markers ~ "early mesodermal genes",
+      TRUE ~ NA_character_
+    ),
+    gene = factor(gene, levels = markers)
+  )
+
+
+# Plot
+ggplot(norm_counts2, aes(x = gene, y = counts)) +
+  geom_boxplot(
+    aes(fill = fill_group, group = interaction(gene, treatment)),
+    outlier.shape = NA,
+    alpha = 0.6,
+    colour = NA
+  ) +
+  geom_jitter(
+    aes(color = fill_group),
+    width  = 0.15,
+    size   = 2,
+    alpha  = 0.9
+  ) +
+  geom_text(
+    aes(y = max_y, label = sig),
+    size     = 4,
+    vjust    = -0.2
+  ) +
+  scale_y_log10()+
+  coord_cartesian(ylim = c(NA, 1000))+
+  scale_fill_manual(
+    values = c(
+      "untreated" = "#4D4D4D",                     # grey
+      "early mesodermal genes" = "#005824"      # green
+    ),
+    na.translate = FALSE
+  ) +
+  scale_color_manual(
+    values = c(
+      "untreated" = "#4D4D4D",
+      "early mesodermal genes" = "#005824"
+    ),
+    na.translate = FALSE
+  ) +
+  labs(
+    y = "Normalized expression (log10 scale)",
+    x = NULL
+  ) +
+  theme_bw(base_size = 10) +
+  theme(
+    axis.text.y  = element_text(size = 8.5, hjust = 1),
+    axis.text.x  = element_text(size = 9, face = "italic", angle = 45, hjust = 1),
+    axis.title.x = element_text(size = 10),
+    panel.grid.major.x = element_line(colour = "grey95"),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor   = element_blank(),
+    legend.title    = element_blank(),
+    legend.text     = element_text(size = 8),
+    legend.key      = element_blank(),
+    legend.position = "right",
+    plot.margin     = margin(5, 10, 5, 20, "pt")
+  )
+    
+            
+
+
+##################################################################################
+############################ GSEA analyses #######################################
+##################################################################################
+##################################################################################
+
+library(dplyr)
+library(clusterProfiler)
+library(enrichplot)
+library(stringr)
+
+## ------------------------------------------------------------
+## 1. Build ranked gene list for GSEA
+##    Use the Wald statistic (same sign as log2FC)
+## ------------------------------------------------------------
+
+res <- as.data.frame(res)
+gene_ranks <- res$stat
+names(gene_ranks) <- rownames(res)
+gene_ranks <- gene_ranks[!is.na(gene_ranks)]
+gene_ranks <- sort(gene_ranks, decreasing = TRUE)
+
+
+##################################################################################
+###################### GSEA: Fetal human nephron markers - Figure S5K ############
+##################################################################################
+
+# Path to marker genes for human fetal nephron, Stewart et al., 2018
+kidney_markers_Stewart_fetal <- read.csv(file = "~/Desktop/dCas9F1F2 RNA-seq/aat5031_data_s3_fetal.csv")
+
+# Make sure Gene and Cell.type are character, not factors
+kidney_markers_Stewart_fetal$Gene      <- as.character(kidney_markers_Stewart_fetal$Gene)
+kidney_markers_Stewart_fetal$Cell.type <- as.character(kidney_markers_Stewart_fetal$Cell.type)
+
+# Split genes by cell type
+kidney_markers_fetal <- split(
+  kidney_markers_Stewart_fetal$Gene,
+  kidney_markers_Stewart_fetal$Cell.type
+)
+
+head(kidney_markers_fetal)
+
+# Clean up: remove duplicates & sort
+kidney_markers_fetal <- lapply(kidney_markers_fetal, function(x) sort(unique(x)))
+
+# Optional: make sure terms have nice names
+names(kidney_markers_fetal) <- str_replace_all(names(kidney_markers_fetal), "_", " ")
+
+## ------------------------------------------------------------
+## 3. Build TERM2GENE data.frame for custom GSEA
+## ------------------------------------------------------------
+
+TERM2GENE_kidney <- do.call(
+  rbind,
+  lapply(names(kidney_markers_fetal), function(ct) {
+    data.frame(
+      term = ct,
+      gene = kidney_markers_fetal[[ct]],
+      stringsAsFactors = FALSE
+    )
+  })
+)
+
+# Optional sanity check:
+head(TERM2GENE_kidney)
+
+## IMPORTANT: gene IDs in TERM2GENE must match names(gene_ranks)
+## If your gene_ranks uses SYMBOLS, make sure TERM2GENE_kidney$gene are SYMBOLS too.
+
+## ------------------------------------------------------------
+## 4. Run multi-set GSEA with smaller minGSSize
+## ------------------------------------------------------------
+
+gsea_kidney_multi <- GSEA(
+  geneList     = gene_ranks,
+  TERM2GENE    = TERM2GENE_kidney,
+  pvalueCutoff = 1,      # keep all, we’ll filter by padj later
+  minGSSize    = 5       # allow smaller sets to be tested
+)
+
+# Look at the basic result table
+gsea_kidney_multi@result[, c("ID", "setSize", "NES", "p.adjust")] %>%
+  arrange(p.adjust) %>%
+  head()
+
+## ------------------------------------------------------------
+## 5. Compute pairwise term similarity (for plotting)
+## ------------------------------------------------------------
+
+gsea_kidney_multi <- pairwise_termsim(gsea_kidney_multi)
+
+
+## ------------------------------------------------------------
+## 6. Beautiful ridgeplot (Nature style + inverted FDR legend)
+## ------------------------------------------------------------
+library(dplyr)
+library(enrichplot)
+library(scales)
+
+## 1. Take top terms by smallest adjusted p-value
+n_terms <- 10
+res_kidney <- gsea_kidney_multi@result %>%
+  arrange(p.adjust)
+
+top_terms_res <- res_kidney %>%
+  filter(ID %in% res_kidney$ID[1:n_terms]) %>%
+  arrange(desc(NES))   # order by NES (strongest enrichment at top)
+
+top_terms <- top_terms_res$ID
+
+## Nice labels: "Pelvic epithelium (NES = 2.23)"
+#lab_df <- top_terms_res %>%
+#  mutate(
+#    label = sprintf("%s (NES = %.2f)", Description, NES))
+
+#label_map <- setNames(lab_df$label, lab_df$Description) ### if using this add scale_y_discrete(labels = label_map) to labels
+
+## 2. Ridgeplot (same as before)
+p_ridge <- ridgeplot(
+  gsea_kidney_multi,
+  showCategory = top_terms,
+  fill         = "p.adjust",
+  label_format = Inf
+)
+
+## 3. Colour scale as you had it
+min_lim <- 0
+max_lim <- 0.5
+
+colour_scale <- scale_fill_gradientn(
+  colours = c(
+    "#800026",  # very low p, deep red
+    "#FC4E2A",  # low p, orange-red
+    "#FEB24C",  # ~0.05, yellow
+    "#9ECAE1",  # above 0.06, light blue
+    "#2166AC",  # mid / higher p
+    "#053061"   # highest p, dark blue
+  ),
+  values = rescale(
+    c(min_lim, 0.01, 0.045, 0.055, 0.3, max_lim),
+    to   = c(0, 1),
+    from = c(min_lim, max_lim)
+  ),
+  limits = c(min_lim, max_lim),
+  oob    = scales::squish,
+  name   = "FDR",
+  breaks = c(0.01, 0.05, 0.10, 0.20, 0.50),
+  labels = c("0.01", "0.05", "0.10", "0.20", "0.50"),
+  guide  = guide_colorbar(reverse = TRUE),
+  trans  = "pseudo_log"
+)
+
+## 4. Apply labels + theme
+p_ridge_pub <- p_ridge +
+  colour_scale +
+  labs(
+    x = "Ranked gene list",
+    y = NULL
+  ) +
+  theme_bw(base_size = 10) +
+  theme(
+    plot.title   = element_blank(),
+    axis.text.y  = element_text(size = 9),
+    axis.text.x  = element_text(size = 9),
+    axis.title.x = element_text(size = 10),
+    panel.grid.major.x = element_line(colour = "grey90", size = 0.3),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor   = element_blank(),
+    legend.position = "right",
+    legend.title    = element_text(size = 9),
+    legend.text     = element_text(size = 8),
+    strip.background = element_rect(fill = "grey95", colour = NA),
+    strip.text       = element_text(size = 9),
+    plot.margin      = margin(5, 10, 5, 10, "pt")
+  )+
+  scale_y_discrete(expand = expansion(mult = c(0.05, 0.12)))  # <-- more space above
+
+print(p_ridge_pub)
+
+
+##################################################################################
+###################### GSEA: Fetal human heart markers - Figure S5J ##############
+##################################################################################
+
+library(readxl)
+library(dplyr)
+library(purrr)
+
+# Path to marker genes for PCW6.5-7 human heart, Asp et al., 2019
+xlsx_path <- "/Users/jaypea/Desktop/dCas9F1F2 RNA-seq/Asp_2019/1-s2.0-S0092867419312826-mmc3.xlsx"
+
+# Cluster → Cell type mapping (0–14)
+cell_types <- c(
+  "Capillary endothelium",                                # 0
+  "Ventricular cardiomyocytes",                          # 1
+  "Fibroblast-like",                                     # 2
+  "Epicardium-derived cells",                            # 3
+  "Fibroblast-like",                                     # 4
+  "Smooth muscle cells / fibroblast-like",               # 5
+  "Erythrocytes",                                        # 6
+  "Atrial cardiomyocytes",                               # 7
+  "Fibroblast-like",                                     # 8
+  "Epicardial cells",                                    # 9
+  "Endothelium / pericytes / adventia",                  # 10
+  "Erythrocytes",                                        # 11
+  "Myoz2-enriched cardiomyocytes",                       # 12
+  "Immune cells",                                        # 13
+  "Cardiac neural crest cells & Schwann progenitor cells" # 14
+)
+
+# Get all sheet names
+sheets <- excel_sheets(xlsx_path)
+
+top50_all <- map_df(sheets, function(sh) {
+  df <- read_excel(xlsx_path, sheet = sh)
+  
+  # Make sure cluster is numeric
+  df <- df %>% mutate(cluster = as.integer(cluster))
+  
+  # Take top 50 genes by avg_logFC (or change to p_val_adj if you prefer)
+  df_top <- df %>%
+    arrange(desc(avg_logFC)) %>%
+    slice_head(n = 50)
+  
+  # Get the (numeric) cluster ID from this sheet
+  cl <- unique(df_top$cluster)
+  
+  if (length(cl) != 1) {
+    stop(paste("Sheet", sh, "has multiple cluster IDs:", paste(cl, collapse = ", ")))
+  }
+  
+  df_top %>%
+    mutate(
+      cell_type = cell_types[cl + 1]   # cl is numeric now, R index is 1-based
+    ) %>%
+    dplyr::select(cell_type, cluster, gene)
+})
+
+top50_all
+# Optional: save to CSV
+# write.csv(top50_all, "Asp_2019_top50_genes_per_cluster.csv", row.names = FALSE)
+
+
+cardiac_markers_asp <- top50_all
+
+# Make sure gene and cell_type are character, not factors
+cardiac_markers_asp$gene      <- as.character(cardiac_markers_asp$gene)
+cardiac_markers_asp$cell_type <- as.character(cardiac_markers_asp$cell_type)
+
+# Split genes by cell type
+cardiac_markers <- split(
+  cardiac_markers_asp$gene,
+  cardiac_markers_asp$cell_type
+)
+
+head(cardiac_markers)
+
+# Clean up: remove duplicates & sort
+cardiac_markers <- lapply(cardiac_markers, function(x) sort(unique(x)))
+
+# Optional: make sure terms have nice names
+names(cardiac_markers) <- str_replace_all(names(cardiac_markers), "_", " ")
+
+## ------------------------------------------------------------
+## 3. Build TERM2GENE data.frame for custom GSEA
+## ------------------------------------------------------------
+
+TERM2GENE_cardiac <- do.call(
+  rbind,
+  lapply(names(cardiac_markers), function(ct) {
+    data.frame(
+      term = ct,
+      gene = cardiac_markers[[ct]],
+      stringsAsFactors = FALSE
+    )
+  })
+)
+
+
+# Optional sanity check:
+tail(TERM2GENE_cardiac)
+
+## IMPORTANT: gene IDs in TERM2GENE must match names(gene_ranks)
+## If your gene_ranks uses SYMBOLS, make sure TERM2GENE_cardiac$gene are SYMBOLS too.
+
+## ------------------------------------------------------------
+## 4. Run multi-set GSEA with smaller minGSSize
+## ------------------------------------------------------------
+
+gsea_cardiac_multi <- GSEA(
+  geneList     = gene_ranks,
+  TERM2GENE    = TERM2GENE_cardiac,
+  pvalueCutoff = 1,      # keep all, we’ll filter by padj later
+  minGSSize    = 5       # allow smaller sets to be tested
+)
+
+# Look at the basic result table
+gsea_cardiac_multi@result[, c("ID", "setSize", "NES", "p.adjust")] %>%
+  arrange(p.adjust) %>%
+  head()
+
+## ------------------------------------------------------------
+## 5. Compute pairwise term similarity (for plotting)
+## ------------------------------------------------------------
+
+gsea_cardiac_multi <- pairwise_termsim(gsea_cardiac_multi)
+
+
+## ------------------------------------------------------------
+## 6. Beautiful ridgeplot (Nature style + inverted FDR legend)
+## ------------------------------------------------------------
+library(dplyr)
+library(enrichplot)
+library(scales)
+
+## 1. Take top terms by smallest adjusted p-value
+n_terms <- 15
+res_cardiac <- gsea_cardiac_multi@result %>%
+  arrange(p.adjust)
+
+top_terms_res <- res_cardiac %>%
+  filter(ID %in% res_cardiac$ID[1:n_terms]) %>%
+  arrange(desc(NES))   # order by NES (strongest enrichment at top)
+
+top_terms <- top_terms_res$ID
+
+## 2. Ridgeplot (same as before)
+p_ridge <- ridgeplot(
+  gsea_cardiac_multi,
+  showCategory = top_terms,
+  fill         = "p.adjust",
+  label_format = Inf
+)
+
+## 3. Colour scale as you had it
+min_lim <- 0
+max_lim <- 0.5
+
+colour_scale <- scale_fill_gradientn(
+  colours = c(
+    "#800026",  # very low p, deep red
+    "#FC4E2A",  # low p, orange-red
+    "#FEB24C",  # ~0.05, yellow
+    "#9ECAE1",  # above 0.06, light blue
+    "#2166AC",  # mid / higher p
+    "#053061"   # highest p, dark blue
+  ),
+  values = rescale(
+    c(min_lim, 0.01, 0.045, 0.055, 0.3, max_lim),
+    to   = c(0, 1),
+    from = c(min_lim, max_lim)
+  ),
+  limits = c(min_lim, max_lim),
+  oob    = scales::squish,
+  name   = "FDR",
+  breaks = c(0.01, 0.05, 0.10, 0.20, 0.50),
+  labels = c("0.01", "0.05", "0.10", "0.20", "0.50"),
+  guide  = guide_colorbar(reverse = TRUE),
+  trans  = "pseudo_log"
+)
+
+## 4. Apply labels + theme
+p_ridge_pub <- p_ridge +
+  colour_scale +
+  labs(
+    x = "Ranked gene list",
+    y = NULL
+  ) +
+  theme_bw(base_size = 10) +
+  theme(
+    plot.title   = element_blank(),
+    axis.text.y  = element_text(size = 9),
+    axis.text.x  = element_text(size = 9),
+    axis.title.x = element_text(size = 10),
+    panel.grid.major.x = element_line(colour = "grey90", size = 0.3),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor   = element_blank(),
+    legend.position = "right",
+    legend.title    = element_text(size = 9),
+    legend.text     = element_text(size = 8),
+    strip.background = element_rect(fill = "grey95", colour = NA),
+    strip.text       = element_text(size = 9),
+    plot.margin      = margin(5, 10, 5, 10, "pt")
+  )+
+  scale_y_discrete(expand = expansion(mult = c(0.05, 0.12)))  # <-- more space above
+
+print(p_ridge_pub)
+
+
+
+
+##################################################################################
+###################### THIS IS ZENG DATASET PCW3 to PCW5 CELL MARKERS ############
+##################################################################################
+##################################################################################
+library(scales)
+
+# adapted from zeng_1-s2.0-S1934590923001340-mmc5
+zeng_PCW3_5_markers <- read.csv(file = "/Users/jaypea/Desktop/dCas9F1F2 RNA-seq/zeng_pcw3-5_degs.csv")
+
+head(zeng_PCW3_5_markers)
+length(unique(zeng_PCW3_5_markers$celltype_region)) #34
+unique(zeng_PCW3_5_markers$celltype_region)
+zeng_PCW3_5_markers <- na.omit(zeng_PCW3_5_markers)
+length(unique(zeng_PCW3_5_markers$celltype_region)) #33
+unique(zeng_PCW3_5_markers$celltype_region)
+
+# Make sure Gene and celltype_region are character, not factors
+zeng_PCW3_5_markers$Gene      <- as.character(zeng_PCW3_5_markers$Gene)
+zeng_PCW3_5_markers$celltype_region <- as.character(zeng_PCW3_5_markers$celltype_region)
+
+# Split genes by cell type
+zeng_PCW3_5_markers <- split(
+  zeng_PCW3_5_markers$Gene,
+  zeng_PCW3_5_markers$celltype_region
+)
+
+# Clean up: remove duplicates & sort
+zeng_PCW3_5_markers <- lapply(zeng_PCW3_5_markers, function(x) sort(unique(x)))
+
+# Optional: make sure terms have nice names
+names(zeng_PCW3_5_markers) <- str_replace_all(names(zeng_PCW3_5_markers), "_", " ")
+
+zeng_PCW3_5_markers$Cardiomyocyte
+
+#######FIX THE LIST!!!!##############
+#Short version:
+#SEPT genes got turned into dates by Excel (e.g. SEPT6 → "06-Sep").
+#The brain-region abbreviations FB, HB, MB, SC were globally replaced by full words (Forebrain progenitor, Hindbrain progenitor, Midbrain progenitor, Spinal cord progenitor) inside gene symbols, not just in labels.
+
+## Function to repair a character vector of gene symbols
+fix_zeng_genes <- function(genes) {
+  # 1. Undo the FB/HB/MB/SC → full-text replacements
+  genes <- gsub("Forebrain progenitor", "FB", genes, fixed = TRUE)
+  genes <- gsub("Hindbrain progenitor",  "HB", genes, fixed = TRUE)
+  genes <- gsub("Midbrain progenitor",   "MB", genes, fixed = TRUE)
+  genes <- gsub("Spinal cord progenitor","SC", genes, fixed = TRUE)
+  
+  # 2. Fix the SEPT genes that became dates
+  sept_map <- c(
+    "06-Sep" = "SEPT6",
+    "07-Sep" = "SEPT7",
+    "09-Sep" = "SEPT9",
+    "11-Sep" = "SEPT11"
+  )
+  idx <- match(genes, names(sept_map))
+  genes[!is.na(idx)] <- sept_map[idx[!is.na(idx)]]
+  
+  genes
+}
+
+## Apply to every cluster in your list
+zeng_PCW3_5_markers_fixed <- lapply(zeng_PCW3_5_markers, fix_zeng_genes)
+
+## Optionally, also fix the mangled cluster names like "Proliferating Spinal cord progenitorlerotome"
+names(zeng_PCW3_5_markers_fixed) <-
+  gsub("Spinal cord progenitorlerotome",
+       "Sclerotome",
+       names(zeng_PCW3_5_markers_fixed),
+       fixed = TRUE)
+
+names(zeng_PCW3_5_markers_fixed) <- gsub(
+  "Spinal cord progenitorlerotome",
+  "Sclerotome",
+  names(zeng_PCW3_5_markers_fixed),
+  fixed = TRUE)
+
+
+zeng_PCW3_5_markers <- zeng_PCW3_5_markers_fixed
+
+length(zeng_PCW3_5_markers$Cardiomyocyte)
+
+## ------------------------------------------------------------
+## 3. Build TERM2GENE data.frame for custom GSEA
+## ------------------------------------------------------------
+
+TERM2GENE_pcw3_5 <- do.call(
+  rbind,
+  lapply(names(zeng_PCW3_5_markers), function(ct) {
+    data.frame(
+      term = ct,
+      gene = zeng_PCW3_5_markers[[ct]],
+      stringsAsFactors = FALSE
+    )
+  })
+)
+
+# Optional sanity check:
+head(TERM2GENE_pcw3_5)
+
+## IMPORTANT: gene IDs in TERM2GENE must match names(gene_ranks)
+## If your gene_ranks uses SYMBOLS, make sure TERM2GENE_pcw3_5$gene are SYMBOLS too.
+
+## ------------------------------------------------------------
+## 4. Run multi-set GSEA with smaller minGSSize
+## ------------------------------------------------------------
+
+gsea_zeng_pcw3_5_multi <- GSEA(
+  geneList     = gene_ranks,
+  TERM2GENE    = TERM2GENE_pcw3_5,
+  pvalueCutoff = 1,      # keep all, we’ll filter by padj later
+  minGSSize    = 5       # allow smaller sets to be tested
+)
+
+# Look at the basic result table
+gsea_zeng_pcw3_5_multi@result[, c("ID", "setSize", "NES", "p.adjust")] %>%
+  arrange(p.adjust) %>%
+  head()
+
+## ------------------------------------------------------------
+## 5. Compute pairwise term similarity (for plotting)
+## ------------------------------------------------------------
+
+gsea_zeng_pcw3_5_multi <- pairwise_termsim(gsea_zeng_pcw3_5_multi)
+
+
+
+fdr <- gsea_zeng_pcw3_5_multi@result$p.adjust
+
+# smallest non-zero FDR
+min_nonzero <- min(fdr[fdr > 0], na.rm = TRUE)
+
+# replace zeros with a tiny value just below the smallest non-zero
+fdr[fdr == 0] <- min_nonzero / 10
+
+gsea_zeng_pcw3_5_multi@result$p.adjust <- fdr
+
+
+
+
+## ------------------------------------------------------------
+## 6. Beautiful ridgeplot (Nature style + inverted FDR legend)
+## ------------------------------------------------------------
+
+n_terms <- 33
+
+res_pcw3_5 <- gsea_zeng_pcw3_5_multi@result %>%
+  arrange(p.adjust)
+
+top_terms <- res_pcw3_5$ID[1:n_terms]
+
+
+p_ridge <- ridgeplot(
+  gsea_zeng_pcw3_5_multi,
+  showCategory = top_terms,
+  fill         = "p.adjust",
+  label_format = Inf   # 🔥 prevents label wrapping completely
+)
+
+
+min_lim <- 0
+max_lim <- 0.5
+
+colour_scale <- scale_fill_gradientn(
+  colours = c(
+    "#800026",  # very low p, deep red
+    "#FC4E2A",  # low p, orange-red
+    "#FEB24C",  # ~0.05, yellow
+    "#9ECAE1",  # above 0.06, light blue
+    "#2166AC",  # mid / higher p
+    "#053061"   # highest p, dark blue
+  ),
+  values = rescale(
+    c(min_lim, 0.01, 0.045, 0.055, 0.3, max_lim),
+    to   = c(0, 1),
+    from = c(min_lim, max_lim)
+  ),
+  limits = c(min_lim, max_lim),
+  oob    = scales::squish,
+  name   = "FDR",
+  breaks = c(0.01, 0.05, 0.10, 0.20, 0.50),
+  labels = c("0.01", "0.05", "0.10", "0.20", "0.50"),
+  guide  = guide_colorbar(reverse = TRUE),
+  trans  = "pseudo_log"
+)
+
+p_ridge_pub <- p_ridge +
+  colour_scale +
+  labs(
+    x = "Ranked gene list",
+    y = NULL
+  ) +
+  theme_bw(base_size = 10) +
+  theme(
+    plot.title   = element_blank(),
+    axis.text.y  = element_text(size = 9, hjust = 1),
+    axis.text.x  = element_text(size = 9),
+    axis.title.x = element_text(size = 10),
+    panel.grid.major.x = element_line(colour = "grey90", size = 0.3),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor   = element_blank(),
+    legend.position = "right",
+    legend.title    = element_text(size = 9),
+    legend.text     = element_text(size = 8),
+    strip.background = element_rect(fill = "grey95", colour = NA),
+    strip.text       = element_text(size = 9),
+    plot.margin      = margin(5, 10, 5, 40, "pt")
+  ) +
+  coord_cartesian(clip = "off")+
+  scale_y_discrete(expand = expansion(mult = c(0.05, 0.05)))  # <-- more space above
+
+print(p_ridge_pub)
+
+
+
+###########################################################################
+############### Identifying FOXC-dependent and independent genes ##########
+####################### for motif analysis in Figure 5F ###################
+###########################################################################
+
+
+foxc_down <- subset(
+  res_frame,
+  padj < 0.05 & log2FoldChange < -0.58)
+
+# Remove trivial positives (the knocked-down genes themselves)
+foxc_down <- foxc_down[!foxc_down$gene_name %in% c("FOXC1", "FOXC2"), ]
+
+# Sanity checks
+nrow(foxc_down)
+head(foxc_down[, c("gene_name", "log2FoldChange", "padj")])
+
+write.table(
+  unique(foxc_down$gene_name),
+  file = "~/Desktop/Loh_mesoderm/FOXC_ATAC/genes/foxc_down_genes.txt",
+  quote = FALSE,
+  row.names = FALSE,
+  col.names = FALSE
+)
+
+# Background: expressed but unchanged genes
+bg_genes <- subset(
+  res_frame,
+  abs(log2FoldChange) < 0.2 & padj > 0.5 & baseMean > 100
+)
+
+write.table(
+  unique(bg_genes$gene_name),
+  file = "~/Desktop/Loh_mesoderm/FOXC_ATAC/genes/background_genes.txt",
+  quote = FALSE,
+  row.names = FALSE,
+  col.names = FALSE
+)
+
+###########################################################################
+###########################################################################
+###########################################################################
+###########################################################################
+
+
