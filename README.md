@@ -6,18 +6,18 @@
 
 This repository contains analysis scripts used for single-nucleus RNA-seq, bulk RNA-seq, and ATAC-seq data in the context of human trunk-like structures (hTLS).
 
-## Repository structure
+### Repository structure
 
-### hTLS_snRNA-seq/
+`hTLS_snRNA-seq/`
 Single-nucleus RNA-seq analysis of hTLS datasets (Seurat workflows, UMAP visualisation, cluster annotation).
 
-### TBX6_RNA-seq/
+`TBX6_RNA-seq/`
 Bulk RNA-seq analysis of doxycycline-inducible TBX6 experiments (DESeq2, PCA, volcano plots, GSEA, integration with reference datasets).
 
-### dCas9_F1F2_RNA-seq/
+`dCas9_F1F2_RNA-seq/`
 Bulk RNA-seq analysis of dCas9 F1/F2 perturbation experiments (DESeq2, marker analysis, GSEA, gene expression visualisation).
 
-### early somite ATAC motif analysis/
+`early somite ATAC motif analysis/`
 Motif enrichment analysis of early somite ATAC-seq peaks using HOMER and bedtools.
 
 ### Requirements
