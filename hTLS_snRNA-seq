@@ -1,0 +1,108 @@
+library(Seurat)
+library(ggplot2)
+library(sctransform)
+library(future)
+library(gridExtra)
+library(cowplot)
+library(dplyr)
+library(patchwork)
+library(RColorBrewer)
+library(SingleCellExperiment)
+library(slingshot)
+library(tradeSeq)
+library(viridis)
+
+packageVersion("Seurat")
+
+palette(brewer.pal(8, "Dark2"))
+
+plan("multisession", workers = 1)
+options(future.globals.maxSize = 8000 * 1024^2)
+
+# Load dataset
+hTLS.data <- Read10X(data.dir = "~/Desktop/hTLS_snRNAseq/")
+
+# Initialize Seurat object
+hTLS <- CreateSeuratObject(
+  counts = hTLS.data,
+  project = "hTLS",
+  min.cells = 3,
+  min.features = 200
+)
+
+# Read metadata
+metadata <- read.csv("~/Desktop/hTLS_snRNAseq/cell_metadata.csv", row.names = 1)
+
+# Make sure metadata rows match cell barcodes
+stopifnot(all(colnames(hTLS) %in% rownames(metadata)))
+metadata <- metadata[colnames(hTLS), , drop = FALSE]
+stopifnot(all(rownames(metadata) == colnames(hTLS)))
+
+# Add metadata
+hTLS <- AddMetaData(hTLS, metadata = metadata)
+
+# Full filtered object used in the paper
+hTLS.sub <- subset(hTLS, subset = full_cluster_annot != "filtered")
+
+# -----------------------------
+# Add published full UMAP
+# -----------------------------
+stopifnot(all(!is.na(hTLS.sub$UMAP_full_1)))
+stopifnot(all(!is.na(hTLS.sub$UMAP_full_2)))
+
+umap_full <- as.matrix(hTLS.sub@meta.data[, c("UMAP_full_1", "UMAP_full_2")])
+rownames(umap_full) <- colnames(hTLS.sub)
+colnames(umap_full) <- c("UMAP_1", "UMAP_2")
+
+hTLS.sub[["umap_published"]] <- CreateDimReducObject(
+  embeddings = umap_full,
+  key = "UMAPPUB_",
+  assay = DefaultAssay(hTLS.sub)
+)
+
+p_full <- DimPlot(
+  hTLS.sub,
+  reduction = "umap_published",
+  group.by = "full_cluster_annot",
+  label = FALSE
+)
+
+# -----------------------------
+# MES subset used in the paper
+# -----------------------------
+hTLS.mes <- subset(hTLS.sub, subset = mes_cluster_annot != "filtered")
+
+stopifnot(all(!is.na(hTLS.mes$UMAP_mes_1)))
+stopifnot(all(!is.na(hTLS.mes$UMAP_mes_2)))
+
+umap_mes <- as.matrix(hTLS.mes@meta.data[, c("UMAP_mes_1", "UMAP_mes_2")])
+rownames(umap_mes) <- colnames(hTLS.mes)
+colnames(umap_mes) <- c("UMAP_1", "UMAP_2")
+
+hTLS.mes[["umap_published"]] <- CreateDimReducObject(
+  embeddings = umap_mes,
+  key = "UMAPPUB_",
+  assay = DefaultAssay(hTLS.mes)
+)
+
+p_mes <- DimPlot(
+  hTLS.mes,
+  reduction = "umap_published",
+  group.by = "mes_cluster_annot",
+  label = FALSE
+)
+
+p_full
+p_mes
+
+
+
+
+
+
+
+
+
+
+
+
