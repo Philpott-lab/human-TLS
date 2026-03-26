@@ -45,7 +45,7 @@ hTLS <- AddMetaData(hTLS, metadata = metadata)
 hTLS.sub <- subset(hTLS, subset = full_cluster_annot != "filtered")
 
 # -----------------------------
-# Add published full UMAP
+# Add UMAP coordinates used in paper
 # -----------------------------
 stopifnot(all(!is.na(hTLS.sub$UMAP_full_1)))
 stopifnot(all(!is.na(hTLS.sub$UMAP_full_2)))
@@ -209,8 +209,7 @@ p_mes_alluvial
 
 
 ## ------------------------------------------------------------
-## tradeSeq + slingshot on hTLS.mes using sparse RNA counts
-## keeps 4 lineages, uses all genes after filtering, no chunking
+## tradeSeq + slingshot on hTLS.mes
 ## ------------------------------------------------------------
 
 library(Seurat)
@@ -234,11 +233,10 @@ table(hTLS.mes$mes_cluster_annot)
 unique(hTLS.mes$mes_cluster_annot)
 
 ## ---- 3) Set lineage root and endpoints manually ----
-## CHANGE THESE to match your mes_cluster_annot labels
 start_clust <- "Early Mesoderm"
 end_clusts  <- c("Nephron tube", "Podocyte", "Somite - muscle lineage", "Somite - mesenchyme")
 
-## ---- 4) Run slingshot on published mesoderm UMAP ----
+## ---- 4) Run slingshot on mesoderm UMAP ----
 crv <- slingshot(
   Embeddings(hTLS.mes, "umap_published"),
   clusterLabels = hTLS.mes$mes_cluster_annot,
