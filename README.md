@@ -38,7 +38,7 @@ External tools (ATAC analysis)
 
 ### Data
 
-Input datasets are not included in this repository. Scripts expect locally stored data (e.g. count tables and reference datasets), and file paths will need to be updated accordingly.
+Input datasets generated in this study are available for download from GEO database, accession number (available soon). Scripts expect locally stored data (e.g. count tables, metadata and reference datasets), and file paths will need to be updated accordingly.
 
 ### Notes
 Scripts are provided as analysis workflows used for figure generation.
