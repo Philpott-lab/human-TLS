@@ -15,7 +15,7 @@ Single-nucleus RNA-seq analysis of hTLS datasets (Seurat workflows, UMAP visuali
 Bulk RNA-seq analysis of doxycycline-inducible TBX6 experiments (DESeq2, PCA, volcano plots, GSEA, integration with reference datasets).
 
 `dCas9_F1F2_RNA-seq/`
-Bulk RNA-seq analysis of dCas9 FOXC1/2 perturbation experiments (DESeq2, marker analysis, GSEA, gene expression visualisation).
+Bulk RNA-seq analysis of CRISPRi FOXC1/2 perturbation experiments (DESeq2, marker analysis, GSEA, gene expression visualisation).
 
 `early somite ATAC motif analysis/`
 Motif enrichment analysis of early somite ATAC-seq peaks using HOMER and bedtools.
