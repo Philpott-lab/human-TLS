@@ -22,7 +22,7 @@ Motif enrichment analysis of early somite ATAC-seq peaks using HOMER and bedtool
 
 ### Requirements
 
-R packages
+R packages:
   Seurat
   ggplot2
   dplyr
@@ -32,7 +32,7 @@ R packages
   pheatmap
   biomaRt
 
-External tools (ATAC analysis)
+External tools (ATAC analysis):
   bedtools
   HOMER
 
