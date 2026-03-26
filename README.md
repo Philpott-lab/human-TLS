@@ -15,28 +15,30 @@ Single-nucleus RNA-seq analysis of hTLS datasets (Seurat workflows, UMAP visuali
 Bulk RNA-seq analysis of doxycycline-inducible TBX6 experiments (DESeq2, PCA, volcano plots, GSEA, integration with reference datasets).
 
 `dCas9_F1F2_RNA-seq/`
-Bulk RNA-seq analysis of dCas9 F1/F2 perturbation experiments (DESeq2, marker analysis, GSEA, gene expression visualisation).
+Bulk RNA-seq analysis of dCas9 FOXC1/2 perturbation experiments (DESeq2, marker analysis, GSEA, gene expression visualisation).
 
 `early somite ATAC motif analysis/`
 Motif enrichment analysis of early somite ATAC-seq peaks using HOMER and bedtools.
 
 ### Requirements
+
 R packages
-Seurat
-ggplot2
-dplyr
-DESeq2
-clusterProfiler
-enrichplot
-pheatmap
-biomaRt
+  Seurat
+  ggplot2
+  dplyr
+  DESeq2
+  clusterProfiler
+  enrichplot
+  pheatmap
+  biomaRt
+
 External tools (ATAC analysis)
-bedtools
-HOMER
+  bedtools
+  HOMER
 
 ### Data
 
-Input datasets are not included in this repository. Scripts expect locally stored data (e.g. 10X matrices, count tables, and reference datasets), and file paths will need to be updated accordingly.
+Input datasets are not included in this repository. Scripts expect locally stored data (e.g. count tables and reference datasets), and file paths will need to be updated accordingly.
 
 ### Notes
 Scripts are provided as analysis workflows used for figure generation.
