@@ -44,7 +44,7 @@ Input datasets generated in this study are available for download from GEO datab
 
 `TBX6_RNA-seq/` GSE326087
 
-`dCas9_F1F2_RNA-seq/` (available soon)
+`dCas9_F1F2_RNA-seq/` GSE326093
 
 Scripts expect locally stored data (e.g. count tables, metadata and reference datasets), and file paths will need to be updated accordingly.
 
