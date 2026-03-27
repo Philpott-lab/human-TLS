@@ -40,7 +40,7 @@ External tools (ATAC analysis):
 
 Input datasets generated in this study are available for download from GEO database, with accession numbers:
 
-`hTLS_snRNA-seq/` (available soon)
+`hTLS_snRNA-seq/` GSE326143
 
 `TBX6_RNA-seq/` GSE326087
 
