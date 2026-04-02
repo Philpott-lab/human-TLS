@@ -641,7 +641,7 @@ gsea_kidney_multi <- pairwise_termsim(gsea_kidney_multi)
 
 
 ## ------------------------------------------------------------
-## 6. Beautiful ridgeplot (Nature style + inverted FDR legend)
+## 6. Ridgeplot
 ## ------------------------------------------------------------
 library(dplyr)
 library(enrichplot)
@@ -857,7 +857,7 @@ gsea_cardiac_multi <- pairwise_termsim(gsea_cardiac_multi)
 
 
 ## ------------------------------------------------------------
-## 6. Beautiful ridgeplot (Nature style + inverted FDR legend)
+## 6. Ridgeplot
 ## ------------------------------------------------------------
 library(dplyr)
 library(enrichplot)
@@ -1079,7 +1079,7 @@ gsea_zeng_pcw3_5_multi@result$p.adjust <- fdr
 
 
 ## ------------------------------------------------------------
-## 6. Beautiful ridgeplot (Nature style + inverted FDR legend)
+## 6. Ridgeplot
 ## ------------------------------------------------------------
 
 n_terms <- 33
