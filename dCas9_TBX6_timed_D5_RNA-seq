@@ -28,7 +28,7 @@ options(timeout = 120)
 #   Late_neu_markers_vsall_pos.csv
 #
 
-base_dir <- "/Users/jaypea/Desktop/QP38Y5_results"
+base_dir <- "...../QP38Y5_results"
 
 # Expression matrix
 expression_matrix_file <- file.path(
@@ -102,9 +102,12 @@ QP38Y5_matrix$gene_name <- make.unique(
 rownames(QP38Y5_matrix) <- QP38Y5_matrix$gene_name
 
 
+
 ######################################################
-################ SAMPLE NAME LOOKUP ##################
+########### hTLS66 DAY 5 SAMPLE LOOKUP ###############
 ######################################################
+
+# Only the 9 samples used for the timed CRISPRi analysis
 
 sample_key <- c(
   "28" = "hTLS66_D5_ct_rep_1",
@@ -123,37 +126,32 @@ sample_key <- c(
 ################ ISOLATE COUNT DATA ##################
 ######################################################
 
+# Build the exact count-column names used in this analysis
+
+count_columns <- paste0(
+  "QP38Y5_",
+  names(sample_key),
+  "_count"
+)
+
+# Select only the Day 5 samples
+
 QP38Y5_counts <- QP38Y5_matrix %>%
   as_tibble(rownames = "gene") %>%
   select(
     gene,
-    matches("^QP38Y5_[0-9]+_count$")
+    all_of(count_columns)
   ) %>%
   mutate(
     across(-gene, as.numeric)
   ) %>%
   column_to_rownames("gene")
 
-sample_num <- as.integer(
-  str_extract(
-    colnames(QP38Y5_counts),
-    "(?<=QP38Y5_)[0-9]+"
-  )
-)
+# Rename count columns using informative sample names
 
-QP38Y5_counts <- QP38Y5_counts[
-  ,
-  order(sample_num)
-]
+colnames(QP38Y5_counts) <- unname(sample_key)
 
-sample_num <- sort(sample_num)
-
-colnames(QP38Y5_counts) <- sample_key$sample_name[
-  match(
-    sample_num,
-    sample_key$sample_num
-  )
-]
+# Force integer counts for DESeq2
 
 count_df <- data.frame(
   lapply(
@@ -164,12 +162,17 @@ count_df <- data.frame(
   check.names = FALSE
 )
 
-count_mat_all <- as.matrix(count_df)
+# Final count matrix used by DESeq2
 
-count_mat_all <- count_mat_all[
-  complete.cases(count_mat_all),
+count_mat <- as.matrix(count_df)
+
+# Remove genes containing missing count values
+
+count_mat <- count_mat[
+  complete.cases(count_mat),
+  ,
+  drop = FALSE
 ]
-
 
 
 ######################################################
@@ -185,14 +188,27 @@ metaData <- data.frame(
       "rep_[0-9]+"
     ),
     condition = case_when(
-      str_detect(sample, "_ct_") ~ "Control",
-      str_detect(sample, "Dox_d-1") ~ "Dox d-1",
-      str_detect(sample, "Dox_d1") ~ "Dox d1"
+      str_detect(
+        sample,
+        "_ct_"
+      ) ~ "Control",
+
+      str_detect(
+        sample,
+        "Dox_d-1"
+      ) ~ "Dox d-1",
+
+      str_detect(
+        sample,
+        "Dox_d1"
+      ) ~ "Dox d1"
     )
   )
 
 rownames(metaData) <- metaData$sample
 metaData$sample <- NULL
+
+# Keep Control as the DESeq2 reference level
 
 metaData$condition <- factor(
   metaData$condition,
@@ -206,6 +222,8 @@ metaData$condition <- factor(
 metaData$replicate <- factor(
   metaData$replicate
 )
+
+# Confirm metadata and count matrix are in the same order
 
 stopifnot(
   all(
@@ -227,7 +245,13 @@ dds <- DESeqDataSetFromMatrix(
 
 dds <- DESeq(dds)
 
-# Pairwise contrasts for Figure S4F
+
+######################################################
+############### PAIRWISE CONTRASTS ###################
+######################################################
+
+# No/low TBX6 versus Full-duration TBX6 knockdown
+
 res_Dox_dminus1_vs_Control <- results(
   dds,
   contrast = c(
@@ -236,6 +260,8 @@ res_Dox_dminus1_vs_Control <- results(
     "Control"
   )
 )
+
+# Short-term versus Full-duration TBX6 knockdown
 
 res_Dox_d1_vs_Control <- results(
   dds,
@@ -246,7 +272,13 @@ res_Dox_d1_vs_Control <- results(
   )
 )
 
+
+######################################################
+###################### VST DATA ######################
+######################################################
+
 # Variance-stabilised expression for PCA and module scores
+
 vsdata <- vst(
   dds,
   blind = FALSE
