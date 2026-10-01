@@ -8,49 +8,71 @@ This repository contains analysis scripts used for single-nucleus RNA-seq, bulk 
 
 ### Repository structure
 
-`hTLS_snRNA-seq/`
-Single-nucleus RNA-seq analysis of hTLS datasets (Seurat workflows, UMAP visualisation, cluster annotation).
+`hTLS_snRNA-seq/`  
+Single-nucleus RNA-seq analysis of hTLS datasets (Seurat workflows, UMAP visualisation, cluster annotation, trajectory analysis).
 
-`TBX6_RNA-seq/`
-Bulk RNA-seq analysis of doxycycline-inducible TBX6 experiments (DESeq2, PCA, volcano plots, GSEA, integration with reference datasets).
+`TBX6_RNA-seq/`  
+Bulk RNA-seq analysis of acute doxycycline-inducible TBX6 overexpression during early hTLS differentiation (DESeq2, PCA, volcano plots, GSEA, integration with reference datasets).
 
-`dCas9_F1F2_RNA-seq/`
+`dCas9_TBX6_D2_RNA-seq/`  
+Bulk RNA-seq analysis of acute CRISPRi-mediated endogenous TBX6 knockdown, with samples harvested at day 2 of hTLS differentiation.
+
+`dCas9_TBX6_timed_D5_RNA-seq/`  
+Bulk RNA-seq analysis of timed CRISPRi-mediated endogenous TBX6 knockdown, comparing different temporal windows of TBX6 activity at day 5 of hTLS differentiation.
+
+`TBX6_dTAG_D5_RNA-seq/`  
+Bulk RNA-seq analysis of sustained TBX6-FKBP overexpression and timed dTAG-mediated TBX6 protein degradation during hTLS differentiation, with samples harvested at day 5.
+
+`dCas9_F1F2_RNA-seq/`  
 Bulk RNA-seq analysis of CRISPRi FOXC1/2 perturbation experiments (DESeq2, marker analysis, GSEA, gene expression visualisation).
 
-`early somite ATAC motif analysis/`
+`early somite ATAC motif analysis/`  
 Motif enrichment analysis of early somite ATAC-seq peaks using HOMER and bedtools.
 
 ### Requirements
 
 R packages:
-  Seurat
-  ggplot2
-  dplyr
-  DESeq2
-  clusterProfiler
-  enrichplot
-  pheatmap
-  biomaRt
+- Seurat
+- ggplot2
+- dplyr
+- tidyr
+- DESeq2
+- clusterProfiler
+- enrichplot
+- pheatmap
+- biomaRt
+- emmeans
+- ggpubr
+- patchwork
 
 External tools (ATAC analysis):
-  bedtools
-  HOMER
+- bedtools
+- HOMER
 
 ### Data
 
-Input datasets generated in this study are available for download from GEO database, with accession numbers:
+Input datasets generated in this study are available for download from the GEO database, with accession numbers:
 
-`hTLS_snRNA-seq/` (available soon)
+`hTLS_snRNA-seq/` — available soon
 
-`TBX6_RNA-seq/` (available soon)
+`TBX6_RNA-seq/` — available soon
 
-`dCas9_F1F2_RNA-seq/` (available soon)
+`dCas9_TBX6_D2_RNA-seq/` — available soon
+
+`dCas9_TBX6_timed_D5_RNA-seq/` — available soon
+
+`TBX6_dTAG_D5_RNA-seq/` — available soon
+
+`dCas9_F1F2_RNA-seq/` — available soon
 
 Scripts expect locally stored data (e.g. count tables, metadata and reference datasets), and file paths will need to be updated accordingly.
 
 ### Notes
+
 Scripts are provided as analysis workflows used for figure generation.
+
 Paths are currently hard-coded and should be adapted before use.
+
 This repository is not a packaged pipeline.
 
 ### Contact
