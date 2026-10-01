@@ -1,3 +1,7 @@
+############################################################
+######################## PACKAGES ##########################
+############################################################
+
 library(Seurat)
 library(ggplot2)
 library(sctransform)
@@ -5,12 +9,21 @@ library(future)
 library(gridExtra)
 library(cowplot)
 library(dplyr)
+library(tibble)
 library(patchwork)
 library(RColorBrewer)
 library(SingleCellExperiment)
 library(slingshot)
 library(tradeSeq)
 library(viridis)
+library(ggalluvial)
+library(scales)
+library(Matrix)
+library(BiocParallel)
+library(mgcv)
+library(ComplexHeatmap)
+library(circlize)
+library(grid)
 
 packageVersion("Seurat")
 
@@ -19,10 +32,15 @@ palette(brewer.pal(8, "Dark2"))
 plan("multisession", workers = 1)
 options(future.globals.maxSize = 8000 * 1024^2)
 
-# Load dataset
-hTLS.data <- Read10X(data.dir = "~/Desktop/hTLS_snRNAseq/")
 
-# Initialize Seurat object
+############################################################
+#################### LOAD snRNA-seq DATA ####################
+############################################################
+
+hTLS.data <- Read10X(
+  data.dir = "~/Desktop/hTLS_snRNAseq/"
+)
+
 hTLS <- CreateSeuratObject(
   counts = hTLS.data,
   project = "hTLS",
@@ -30,29 +48,70 @@ hTLS <- CreateSeuratObject(
   min.features = 200
 )
 
-# Read metadata
-metadata <- read.csv("~/Desktop/hTLS_snRNAseq/cell_metadata.csv", row.names = 1)
 
-# Make sure metadata rows match cell barcodes
+# Read deposited cell metadata
+metadata <- read.csv(
+  "~/Desktop/hTLS_snRNAseq/cell_metadata.csv",
+  row.names = 1
+)
+
+# Ensure metadata rows correspond exactly to cell barcodes
 stopifnot(all(colnames(hTLS) %in% rownames(metadata)))
-metadata <- metadata[colnames(hTLS), , drop = FALSE]
-stopifnot(all(rownames(metadata) == colnames(hTLS)))
 
-# Add metadata
-hTLS <- AddMetaData(hTLS, metadata = metadata)
+metadata <- metadata[
+  colnames(hTLS),
+  ,
+  drop = FALSE
+]
 
-# Full filtered object used in the paper
-hTLS.sub <- subset(hTLS, subset = full_cluster_annot != "filtered")
+stopifnot(
+  all(rownames(metadata) == colnames(hTLS))
+)
 
-# -----------------------------
-# Add UMAP coordinates used in paper
-# -----------------------------
-stopifnot(all(!is.na(hTLS.sub$UMAP_full_1)))
-stopifnot(all(!is.na(hTLS.sub$UMAP_full_2)))
+hTLS <- AddMetaData(
+  hTLS,
+  metadata = metadata
+)
 
-umap_full <- as.matrix(hTLS.sub@meta.data[, c("UMAP_full_1", "UMAP_full_2")])
+
+# SCTransform-normalised expression used for Seurat marker analysis
+hTLS <- SCTransform(
+  hTLS,
+  verbose = FALSE
+)
+
+
+############################################################
+############ PUBLISHED FULL-DATASET UMAP ###################
+############################################################
+
+# Remove clusters excluded from downstream analyses
+hTLS.sub <- subset(
+  hTLS,
+  subset = full_cluster_annot != "filtered"
+)
+
+stopifnot(
+  all(!is.na(hTLS.sub$UMAP_full_1)),
+  all(!is.na(hTLS.sub$UMAP_full_2))
+)
+
+umap_full <- as.matrix(
+  hTLS.sub@meta.data[
+    ,
+    c(
+      "UMAP_full_1",
+      "UMAP_full_2"
+    )
+  ]
+)
+
 rownames(umap_full) <- colnames(hTLS.sub)
-colnames(umap_full) <- c("UMAP_1", "UMAP_2")
+
+colnames(umap_full) <- c(
+  "UMAP_1",
+  "UMAP_2"
+)
 
 hTLS.sub[["umap_published"]] <- CreateDimReducObject(
   embeddings = umap_full,
@@ -67,17 +126,39 @@ p_full <- DimPlot(
   label = FALSE
 )
 
-# -----------------------------
-# MES subset used in the paper
-# -----------------------------
-hTLS.mes <- subset(hTLS.sub, subset = mes_cluster_annot != "filtered")
+p_full
 
-stopifnot(all(!is.na(hTLS.mes$UMAP_mes_1)))
-stopifnot(all(!is.na(hTLS.mes$UMAP_mes_2)))
 
-umap_mes <- as.matrix(hTLS.mes@meta.data[, c("UMAP_mes_1", "UMAP_mes_2")])
+############################################################
+############### PUBLISHED MESODERM UMAP ####################
+############################################################
+
+hTLS.mes <- subset(
+  hTLS.sub,
+  subset = mes_cluster_annot != "filtered"
+)
+
+stopifnot(
+  all(!is.na(hTLS.mes$UMAP_mes_1)),
+  all(!is.na(hTLS.mes$UMAP_mes_2))
+)
+
+umap_mes <- as.matrix(
+  hTLS.mes@meta.data[
+    ,
+    c(
+      "UMAP_mes_1",
+      "UMAP_mes_2"
+    )
+  ]
+)
+
 rownames(umap_mes) <- colnames(hTLS.mes)
-colnames(umap_mes) <- c("UMAP_1", "UMAP_2")
+
+colnames(umap_mes) <- c(
+  "UMAP_1",
+  "UMAP_2"
+)
 
 hTLS.mes[["umap_published"]] <- CreateDimReducObject(
   embeddings = umap_mes,
@@ -92,83 +173,91 @@ p_mes <- DimPlot(
   label = FALSE
 )
 
-p_full
 p_mes
 
 
+############################################################
+############ ALLUVIAL PLOT — FIGURE 1H #####################
+############################################################
 
-### Alluvial plot mesoderm subset - Figure 1H
-
-
-library(dplyr)
-library(ggplot2)
-library(ggalluvial)
-library(tibble)
-library(Seurat)
-library(scales)
-
-# Check object
-hTLS.mes
-
-# Optional: inspect available annotations
-table(hTLS.mes$mes_cluster_annot)
-table(hTLS.mes$time_point)
-
-# Build metadata table
 meta_mes <- hTLS.mes@meta.data %>%
   rownames_to_column("cell")
 
-# Count cells per cluster per time point
+
+# Count cells per cluster and time point
 freq_df_mes <- meta_mes %>%
-  filter(time_point != "iPSC") %>%   # drop iPSC if present
-  mutate(cluster = mes_cluster_annot) %>%
-  dplyr::count(time_point, cluster, name = "Freq") %>%
+  filter(
+    time_point != "iPSC"
+  ) %>%
+  mutate(
+    cluster = mes_cluster_annot
+  ) %>%
+  count(
+    time_point,
+    cluster,
+    name = "Freq"
+  ) %>%
   mutate(
     time_point = factor(
       time_point,
-      levels = c("d0", "d2", "d3", "d4", "d5", "d6", "d7")
+      levels = c(
+        "d0",
+        "d2",
+        "d3",
+        "d4",
+        "d5",
+        "d6",
+        "d7"
+      )
     )
   )
 
-head(freq_df_mes)
 
-# Convert to proportions within each time point
+# Proportion of mesodermal cells at each time point
 freq_prop_mes <- freq_df_mes %>%
   group_by(time_point) %>%
-  mutate(Prop = Freq / sum(Freq)) %>%
+  mutate(
+    Prop = Freq / sum(Freq)
+  ) %>%
   ungroup()
 
-# Set cluster order manually
+
+# Revised mesoderm-cluster nomenclature
 cluster_order_mes <- c(
   "Early Mesoderm",
-  "Somite Progenitor",
-  "Somite - mesenchyme",
-  "Somite - muscle lineage",
-  "Nephron progenitor",
-  "Nephron tube",
+  "Somite progenitor",
+  "Somite-mesenchyme",
+  "Somite-muscle",
+  "Renal progenitor",
+  "Renal tube-like",
   "Podocyte"
 )
 
 freq_prop_mes <- freq_prop_mes %>%
   mutate(
-    cluster = factor(cluster, levels = cluster_order_mes)
+    cluster = factor(
+      cluster,
+      levels = cluster_order_mes
+    )
   )
 
-# Colours named by cluster label
+
 cluster_cols_named <- c(
-  "Early Mesoderm" = "#F8766D",
-  "Somite Progenitor" = "#00C094",
-  "Somite - mesenchyme" = "#53B400",
-  "Somite - muscle lineage" = "#A58AFF",
-  "Nephron progenitor" = "#C49A00",
-  "Nephron tube" = "#00B6EB",
-  "Podocyte" = "#FB61D7"
+  "Early Mesoderm"      = "#F8766D",
+  "Somite progenitor"   = "#00C094",
+  "Somite-mesenchyme"   = "#53B400",
+  "Somite-muscle"       = "#A58AFF",
+  "Renal progenitor"    = "#C49A00",
+  "Renal tube-like"     = "#00B6EB",
+  "Podocyte"            = "#FB61D7"
 )
 
-# Keep only colours for clusters actually present
-cluster_cols_named <- cluster_cols_named[names(cluster_cols_named) %in% unique(as.character(freq_prop_mes$cluster))]
+cluster_cols_named <- cluster_cols_named[
+  names(cluster_cols_named) %in%
+    unique(as.character(freq_prop_mes$cluster))
+]
 
-# Alluvial plot
+
 p_mes_alluvial <- ggplot(
   freq_prop_mes,
   aes(
@@ -182,156 +271,291 @@ p_mes_alluvial <- ggplot(
   geom_flow(
     stat = "alluvium",
     lode.guidance = "forward",
-    color = "grey50"
+    colour = "grey50"
   ) +
   geom_stratum() +
-  scale_fill_manual(values = cluster_cols_named) +
-  scale_y_continuous(labels = scales::percent) +
+  scale_fill_manual(
+    values = cluster_cols_named
+  ) +
+  scale_y_continuous(
+    labels = scales::percent
+  ) +
   labs(
     x = "Time point",
     y = "Proportion of cells",
     fill = "Cluster"
   ) +
   theme(
-    panel.border = element_rect(colour = "black", fill = NA, size = 1),
+    panel.border = element_rect(
+      colour = "black",
+      fill = NA,
+      linewidth = 1
+    ),
     panel.grid.major = element_blank(),
     panel.grid.minor = element_blank(),
-    panel.background = element_rect(fill = "white", colour = "white"),
-    axis.title.x = element_text(size = 16, vjust = -1),
-    axis.text.x = element_text(size = 12),
-    axis.title.y = element_text(size = 16),
-    axis.text.y = element_text(size = 12),
+    panel.background = element_rect(
+      fill = "white",
+      colour = "white"
+    ),
+    axis.title.x = element_text(
+      size = 16,
+      vjust = -1
+    ),
+    axis.text.x = element_text(
+      size = 12
+    ),
+    axis.title.y = element_text(
+      size = 16
+    ),
+    axis.text.y = element_text(
+      size = 12
+    ),
     plot.title = element_blank()
   )
 
 p_mes_alluvial
 
 
+############################################################
+########### SLINGSHOT + TRADESEQ — FIGURE 1J/K ############
+############################################################
 
-## ------------------------------------------------------------
-## tradeSeq + slingshot on hTLS.mes
-## ------------------------------------------------------------
-
-library(Seurat)
-library(slingshot)
-library(tradeSeq)
-library(Matrix)
-library(SingleCellExperiment)
-library(BiocParallel)
-library(mgcv)
-
-## ---- 0) Basic options ----
 set.seed(7)
-options(stringsAsFactors = FALSE)
-options(timeout = max(3000, getOption("timeout")))
 
-## ---- 1) Make sure RNA assay is active ----
+options(
+  stringsAsFactors = FALSE,
+  timeout = max(
+    3000,
+    getOption("timeout")
+  )
+)
+
+
+# RNA counts used by tradeSeq
 DefaultAssay(hTLS.mes) <- "RNA"
 
-## ---- 2) Check available mesoderm cluster labels ----
+
+# Check revised mesoderm annotations
 table(hTLS.mes$mes_cluster_annot)
 unique(hTLS.mes$mes_cluster_annot)
 
-## ---- 3) Set lineage root and endpoints manually ----
-start_clust <- "Early Mesoderm"
-end_clusts  <- c("Nephron tube", "Podocyte", "Somite - muscle lineage", "Somite - mesenchyme")
 
-## ---- 4) Run slingshot on mesoderm UMAP ----
+# Root and terminal states
+start_clust <- "Early Mesoderm"
+
+end_clusts <- c(
+  "Renal tube-like",
+  "Podocyte",
+  "Somite-muscle",
+  "Somite-mesenchyme"
+)
+
+
+# Run Slingshot using published mesoderm UMAP coordinates
 crv <- slingshot(
-  Embeddings(hTLS.mes, "umap_published"),
+  Embeddings(
+    hTLS.mes,
+    "umap_published"
+  ),
   clusterLabels = hTLS.mes$mes_cluster_annot,
-  start.clus    = start_clust,
-  end.clus      = end_clusts,
-  stretch       = 0,
+  start.clus = start_clust,
+  end.clus = end_clusts,
+  stretch = 0,
   approx_points = 20
 )
 
-## ---- 5) Extract pseudotime and lineage weights ----
-pseudotime  <- slingPseudotime(crv, na = FALSE)   # cells x lineages
-cellWeights <- slingCurveWeights(crv)             # cells x lineages
 
-## ---- 6) Get sparse RNA counts (genes x cells) ----
-counts <- GetAssayData(hTLS.mes, assay = "RNA", slot = "counts")
+# Extract pseudotime and lineage weights
+pseudotime <- slingPseudotime(
+  crv,
+  na = FALSE
+)
+
+cellWeights <- slingCurveWeights(
+  crv
+)
+
+
+# Sparse raw RNA counts
+counts <- GetAssayData(
+  hTLS.mes,
+  assay = "RNA",
+  layer = "counts"
+)
 
 if (!inherits(counts, "dgCMatrix")) {
-  counts <- as(counts, "dgCMatrix")
+  counts <- as(
+    counts,
+    "dgCMatrix"
+  )
 }
 
-## ---- 7) Gene filtering ----
-## Keep genes expressed in >6% of cells
-keep_frac <- Matrix::rowMeans(counts > 0) > 0.06
-counts <- counts[keep_frac, , drop = FALSE]
 
-## Remove extremely sparse tail
-nz  <- Matrix::rowSums(counts > 0)
-cut <- as.numeric(quantile(nz, probs = 0.005, names = FALSE))
+# Keep genes expressed in >6% of cells
+keep_frac <- Matrix::rowMeans(
+  counts > 0
+) > 0.06
+
+counts <- counts[
+  keep_frac,
+  ,
+  drop = FALSE
+]
+
+
+# Remove extremely sparse tail
+nz <- Matrix::rowSums(
+  counts > 0
+)
+
+cut <- as.numeric(
+  quantile(
+    nz,
+    probs = 0.005,
+    names = FALSE
+  )
+)
+
 keep_nz <- nz > cut
-counts  <- counts[keep_nz, , drop = FALSE]
 
-## ---- 8) Align cell order between counts and pseudotime/weights ----
-common_cells <- intersect(colnames(counts), rownames(pseudotime))
-
-counts      <- counts[, common_cells, drop = FALSE]
-pseudotime  <- pseudotime[common_cells, , drop = FALSE]
-cellWeights <- cellWeights[common_cells, , drop = FALSE]
+counts <- counts[
+  keep_nz,
+  ,
+  drop = FALSE
+]
 
 
+# Align cell order
+common_cells <- intersect(
+  colnames(counts),
+  rownames(pseudotime)
+)
+
+counts <- counts[
+  ,
+  common_cells,
+  drop = FALSE
+]
+
+pseudotime <- pseudotime[
+  common_cells,
+  ,
+  drop = FALSE
+]
+
+cellWeights <- cellWeights[
+  common_cells,
+  ,
+  drop = FALSE
+]
 
 
-## Plotting trajectories on mesoderm subset UMAP (Figure 1J)
-library(ggplot2)
-library(slingshot)
-library(Seurat)
+############################################################
+############ PLOT SLINGSHOT TRAJECTORIES ###################
+############################################################
 
-curve_cols <- c("#00B6EB", "#FB61D7", "#53B400", "#A58AFF")
+curve_cols <- c(
+  "#00B6EB",
+  "#FB61D7",
+  "#A58AFF",
+  "#53B400"
+)
 
-df_umap <- as.data.frame(Embeddings(hTLS.mes, "umap_published"))
-colnames(df_umap) <- c("dim1", "dim2")
+df_umap <- as.data.frame(
+  Embeddings(
+    hTLS.mes,
+    "umap_published"
+  )
+)
 
-p_base <- ggplot(df_umap, aes(dim1, dim2)) +
-  geom_point(color = "grey90", size = 0.6) +
+colnames(df_umap) <- c(
+  "dim1",
+  "dim2"
+)
+
+p_base <- ggplot(
+  df_umap,
+  aes(
+    dim1,
+    dim2
+  )
+) +
+  geom_point(
+    colour = "grey90",
+    size = 0.6
+  ) +
   theme(
-    panel.border = element_rect(colour = "black", fill = NA, size = 1),
+    panel.border = element_rect(
+      colour = "black",
+      fill = NA,
+      linewidth = 1
+    ),
     axis.text = element_blank(),
     axis.ticks = element_blank(),
-    axis.title.x = element_text(hjust = 0, vjust = 1, size = 13),
-    axis.title.y = element_text(hjust = 0, vjust = 0, size = 13),
+    axis.title.x = element_text(
+      hjust = 0,
+      vjust = 1,
+      size = 13
+    ),
+    axis.title.y = element_text(
+      hjust = 0,
+      vjust = 0,
+      size = 13
+    ),
     panel.grid.major = element_blank(),
     panel.grid.minor = element_blank(),
-    panel.background = element_rect(fill = "white", colour = "white"),
+    panel.background = element_rect(
+      fill = "white",
+      colour = "white"
+    ),
     plot.title = element_blank()
   ) +
-  labs(x = "UMAP 1", y = "UMAP 2") +
+  labs(
+    x = "UMAP 1",
+    y = "UMAP 2"
+  ) +
   NoLegend()
+
 
 curves_list <- slingCurves(crv)
 
 for (i in seq_along(curves_list)) {
+  
   crv_i <- curves_list[[i]]
-  curve_df <- as.data.frame(crv_i$s[crv_i$ord, , drop = FALSE])
-  colnames(curve_df) <- c("dim1", "dim2")
+  
+  curve_df <- as.data.frame(
+    crv_i$s[
+      crv_i$ord,
+      ,
+      drop = FALSE
+    ]
+  )
+  
+  colnames(curve_df) <- c(
+    "dim1",
+    "dim2"
+  )
   
   p_base <- p_base +
     geom_path(
       data = curve_df,
-      aes(dim1, dim2),
+      aes(
+        dim1,
+        dim2
+      ),
       inherit.aes = FALSE,
       linewidth = 1.2,
-      color = curve_cols[i]
+      colour = curve_cols[i]
     )
 }
 
 p_base
 
 
+############################################################
+##################### TRADESEQ fitGAM ######################
+############################################################
 
-
-
-
-
-
-
-## ---- 9) BiocParallel setup ----
 bp <- SnowParam(
   workers = 3,
   type = "SOCK",
@@ -345,164 +569,476 @@ gam_ctrl <- mgcv::gam.control(
   trace = FALSE
 )
 
-## ---- 10) fitGAM ----
+
 sce <- fitGAM(
-  counts      = counts,
-  pseudotime  = pseudotime,
+  counts = counts,
+  pseudotime = pseudotime,
   cellWeights = cellWeights,
-  nknots      = 6,
-  verbose     = TRUE,
-  BPPARAM     = bp,
-  control     = gam_ctrl
+  nknots = 6,
+  verbose = TRUE,
+  BPPARAM = bp,
+  control = gam_ctrl
 )
 
-## ---- 11) Save result ----
+
 saveRDS(
   sce,
   file = "~/Desktop/hTLS_mes_tradeSeq_fitGAM_sparse_allgenes_4lineages_6knots_6pct.rds"
 )
 
-## ---- 12) Optional checks ----
 sce
 
 
+############################################################
+######## LINEAGE-ENDPOINT GENES — FIGURE 1K ################
+############################################################
+
+endRes <- diffEndTest(
+  sce,
+  pairwise = TRUE
+)
+
+res <- endRes %>%
+  rownames_to_column("gene")
 
 
-## ============================================================
-## tradeSeq endpoint markers -> 4 side-by-side lineage heatmaps
-## for hTLS.mes (Figure 1K)
-## ============================================================
+safe_logp <- function(p) {
+  -log10(
+    pmax(
+      p,
+      .Machine$double.xmin
+    )
+  )
+}
 
-library(dplyr)
-library(tibble)
-library(tradeSeq)
-library(ComplexHeatmap)
-library(circlize)
-library(grid)
 
-## ---------------------------
-## 1) Endpoint DE + top genes
-## ---------------------------
-endRes <- diffEndTest(sce, pairwise = TRUE)
-res <- endRes %>% rownames_to_column("gene")
-
-safe_logp <- function(p) -log10(pmax(p, .Machine$double.xmin))
-
+# Lineage 1
 top_genes_L1 <- res %>%
   filter(
-    pvalue_1vs2 < 0.05, pvalue_1vs3 < 0.05, pvalue_1vs4 < 0.05,
-    logFC1_2 > 0, logFC1_3 > 0, logFC1_4 > 0
+    pvalue_1vs2 < 0.05,
+    pvalue_1vs3 < 0.05,
+    pvalue_1vs4 < 0.05,
+    logFC1_2 > 0,
+    logFC1_3 > 0,
+    logFC1_4 > 0
   ) %>%
-  mutate(score = safe_logp(pvalue_1vs2) + safe_logp(pvalue_1vs3) + safe_logp(pvalue_1vs4)) %>%
-  arrange(desc(score))
+  mutate(
+    score =
+      safe_logp(pvalue_1vs2) +
+      safe_logp(pvalue_1vs3) +
+      safe_logp(pvalue_1vs4)
+  ) %>%
+  arrange(
+    desc(score)
+  )
 
+
+# Lineage 2
 top_genes_L2 <- res %>%
   filter(
-    pvalue_1vs2 < 0.05, pvalue_2vs3 < 0.05, pvalue_2vs4 < 0.05,
-    logFC1_2 < 0, logFC2_3 > 0, logFC2_4 > 0
+    pvalue_1vs2 < 0.05,
+    pvalue_2vs3 < 0.05,
+    pvalue_2vs4 < 0.05,
+    logFC1_2 < 0,
+    logFC2_3 > 0,
+    logFC2_4 > 0
   ) %>%
-  mutate(score = safe_logp(pvalue_1vs2) + safe_logp(pvalue_2vs3) + safe_logp(pvalue_2vs4)) %>%
-  arrange(desc(score))
+  mutate(
+    score =
+      safe_logp(pvalue_1vs2) +
+      safe_logp(pvalue_2vs3) +
+      safe_logp(pvalue_2vs4)
+  ) %>%
+  arrange(
+    desc(score)
+  )
 
+
+# Lineage 3
 top_genes_L3 <- res %>%
   filter(
-    pvalue_1vs3 < 0.05, pvalue_2vs3 < 0.05, pvalue_3vs4 < 0.05,
-    logFC1_3 < 0, logFC2_3 < 0, logFC3_4 > 0
+    pvalue_1vs3 < 0.05,
+    pvalue_2vs3 < 0.05,
+    pvalue_3vs4 < 0.05,
+    logFC1_3 < 0,
+    logFC2_3 < 0,
+    logFC3_4 > 0
   ) %>%
-  mutate(score = safe_logp(pvalue_1vs3) + safe_logp(pvalue_2vs3) + safe_logp(pvalue_3vs4)) %>%
-  arrange(desc(score))
+  mutate(
+    score =
+      safe_logp(pvalue_1vs3) +
+      safe_logp(pvalue_2vs3) +
+      safe_logp(pvalue_3vs4)
+  ) %>%
+  arrange(
+    desc(score)
+  )
 
+
+# Lineage 4
 top_genes_L4 <- res %>%
   filter(
-    pvalue_1vs4 < 0.05, pvalue_2vs4 < 0.05, pvalue_3vs4 < 0.05,
-    logFC1_4 < 0, logFC2_4 < 0, logFC3_4 < 0
+    pvalue_1vs4 < 0.05,
+    pvalue_2vs4 < 0.05,
+    pvalue_3vs4 < 0.05,
+    logFC1_4 < 0,
+    logFC2_4 < 0,
+    logFC3_4 < 0
   ) %>%
-  mutate(score = safe_logp(pvalue_1vs4) + safe_logp(pvalue_2vs4) + safe_logp(pvalue_3vs4)) %>%
-  arrange(desc(score))
+  mutate(
+    score =
+      safe_logp(pvalue_1vs4) +
+      safe_logp(pvalue_2vs4) +
+      safe_logp(pvalue_3vs4)
+  ) %>%
+  arrange(
+    desc(score)
+  )
 
-g1 <- head(top_genes_L1$gene, 20)
-g2 <- head(top_genes_L2$gene, 20)
-g3 <- head(top_genes_L3$gene, 20)
-g4 <- head(top_genes_L4$gene, 20)
 
-genes80 <- unique(c(g1, g2, g3, g4))
-stopifnot(length(genes80) <= 80)
+# Top 20 endpoint genes per lineage
+g1 <- head(
+  top_genes_L1$gene,
+  20
+)
 
-write.csv(genes80, file = "~/Desktop/hTLS_mes_genes80.csv", row.names = FALSE)
+g2 <- head(
+  top_genes_L2$gene,
+  20
+)
+
+g3 <- head(
+  top_genes_L3$gene,
+  20
+)
+
+g4 <- head(
+  top_genes_L4$gene,
+  20
+)
+
+
+genes80 <- unique(
+  c(
+    g1,
+    g2,
+    g3,
+    g4
+  )
+)
+
+stopifnot(
+  length(genes80) <= 80
+)
+
 
 genes80_ordered <- c(
   g1,
-  setdiff(g2, g1),
-  setdiff(g3, c(g1, g2)),
-  setdiff(g4, c(g1, g2, g3))
+  setdiff(
+    g2,
+    g1
+  ),
+  setdiff(
+    g3,
+    c(
+      g1,
+      g2
+    )
+  ),
+  setdiff(
+    g4,
+    c(
+      g1,
+      g2,
+      g3
+    )
+  )
 )
 
-write.csv(top_genes_L1, file = "~/Desktop/hTLS_mes_top_genes_L1.csv", row.names = FALSE)
-write.csv(top_genes_L2, file = "~/Desktop/hTLS_mes_top_genes_L2.csv", row.names = FALSE)
-write.csv(top_genes_L3, file = "~/Desktop/hTLS_mes_top_genes_L3.csv", row.names = FALSE)
-write.csv(top_genes_L4, file = "~/Desktop/hTLS_mes_top_genes_L4.csv", row.names = FALSE)
 
-## ---------------------------
-## 2) Fitted curves (60 points)
-## ---------------------------
-pred80 <- predictSmooth(sce, gene = genes80, nPoints = 60, tidy = FALSE)
+############################################################
+######## FITTED EXPRESSION ALONG EACH LINEAGE ##############
+############################################################
+
+pred80 <- predictSmooth(
+  sce,
+  gene = genes80,
+  nPoints = 60,
+  tidy = FALSE
+)
+
 
 get_lin_mat <- function(pred_mat, L) {
-  cols <- grep(paste0("^lineage", L, "_"), colnames(pred_mat), value = TRUE)
-  if (length(cols) == 0) stop("No columns found for lineage ", L)
-  pred_mat[, cols, drop = FALSE]
+  
+  cols <- grep(
+    paste0(
+      "^lineage",
+      L,
+      "_"
+    ),
+    colnames(pred_mat),
+    value = TRUE
+  )
+  
+  if (length(cols) == 0) {
+    stop(
+      "No columns found for lineage ",
+      L
+    )
+  }
+  
+  pred_mat[
+    ,
+    cols,
+    drop = FALSE
+  ]
 }
 
-m1 <- get_lin_mat(pred80, 1)
-m2 <- get_lin_mat(pred80, 2)
-m3 <- get_lin_mat(pred80, 3)
-m4 <- get_lin_mat(pred80, 4)
 
-prep_log <- function(m, genes) log1p(m[genes, , drop = FALSE])
+m1 <- get_lin_mat(
+  pred80,
+  1
+)
 
-L1_log <- prep_log(m1, genes80_ordered)
-L2_log <- prep_log(m2, genes80_ordered)
-L3_log <- prep_log(m3, genes80_ordered)
-L4_log <- prep_log(m4, genes80_ordered)
+m2 <- get_lin_mat(
+  pred80,
+  2
+)
 
-## ---------------------------
-## 3) Weighted z-score heatmaps
-## ---------------------------
+m3 <- get_lin_mat(
+  pred80,
+  3
+)
+
+m4 <- get_lin_mat(
+  pred80,
+  4
+)
+
+
+prep_log <- function(m, genes) {
+  log1p(
+    m[
+      genes,
+      ,
+      drop = FALSE
+    ]
+  )
+}
+
+
+L1_log <- prep_log(
+  m1,
+  genes80_ordered
+)
+
+L2_log <- prep_log(
+  m2,
+  genes80_ordered
+)
+
+L3_log <- prep_log(
+  m3,
+  genes80_ordered
+)
+
+L4_log <- prep_log(
+  m4,
+  genes80_ordered
+)
+
+
+############################################################
+######## GLOBAL WEIGHTED Z-SCORE — FIGURE 1K ###############
+############################################################
+
+# Standardise each gene across fitted expression from ALL
+# lineages, rather than independently within each lineage.
+
+all_lineages_log <- cbind(
+  L1_log,
+  L2_log,
+  L3_log,
+  L4_log
+)
+
+
 row_z <- function(m) {
-  z <- t(scale(t(m)))
-  z[is.na(z)] <- 0
+  
+  z <- t(
+    scale(
+      t(m)
+    )
+  )
+  
+  z[
+    is.na(z)
+  ] <- 0
+  
   z
 }
 
-expr_weight <- function(logm, mid = 0.75, scale = 0.12) {
-  1 / (1 + exp(-(logm - mid) / scale))
-}
 
-apply_weighted_z <- function(logm, mid = 0.75, scale = 0.12) {
-  row_z(logm) * expr_weight(logm, mid = mid, scale = scale)
-}
-
-h1 <- apply_weighted_z(L1_log, mid = 0.75, scale = 0.12)
-h2 <- apply_weighted_z(L2_log, mid = 0.75, scale = 0.12)
-h3 <- apply_weighted_z(L3_log, mid = 0.75, scale = 0.12)
-h4 <- apply_weighted_z(L4_log, mid = 0.75, scale = 0.12)
-
-cap <- 2.5
-clip <- function(x, cap) pmax(pmin(x, cap), -cap)
-
-h1 <- clip(h1, cap)
-h2 <- clip(h2, cap)
-h3 <- clip(h3, cap)
-h4 <- clip(h4, cap)
-
-col_fun <- circlize::colorRamp2(
-  c(-cap, -cap/2, 0, cap/2, cap),
-  c("#096fad", "#92c5de", "grey99", "#f7c2ac", "#c90422")
+global_z <- row_z(
+  all_lineages_log
 )
 
-ht_width <- unit(6, "cm")
 
-mk_ht <- function(h, id, show_legend = TRUE) {
+# Split globally standardised values back into lineages
+n1 <- ncol(L1_log)
+n2 <- ncol(L2_log)
+n3 <- ncol(L3_log)
+n4 <- ncol(L4_log)
+
+i1 <- seq_len(n1)
+
+i2 <- (max(i1) + 1):(
+  max(i1) + n2
+)
+
+i3 <- (max(i2) + 1):(
+  max(i2) + n3
+)
+
+i4 <- (max(i3) + 1):(
+  max(i3) + n4
+)
+
+
+z1 <- global_z[
+  ,
+  i1,
+  drop = FALSE
+]
+
+z2 <- global_z[
+  ,
+  i2,
+  drop = FALSE
+]
+
+z3 <- global_z[
+  ,
+  i3,
+  drop = FALSE
+]
+
+z4 <- global_z[
+  ,
+  i4,
+  drop = FALSE
+]
+
+
+# Down-weight fitted expression close to zero
+expr_weight <- function(
+  logm,
+  mid = 0.75,
+  scale = 0.12
+) {
+  
+  1 / (
+    1 +
+      exp(
+        -(logm - mid) / scale
+      )
+  )
+}
+
+
+h1 <- z1 * expr_weight(
+  L1_log,
+  mid = 0.75,
+  scale = 0.12
+)
+
+h2 <- z2 * expr_weight(
+  L2_log,
+  mid = 0.75,
+  scale = 0.12
+)
+
+h3 <- z3 * expr_weight(
+  L3_log,
+  mid = 0.75,
+  scale = 0.12
+)
+
+h4 <- z4 * expr_weight(
+  L4_log,
+  mid = 0.75,
+  scale = 0.12
+)
+
+
+# Clip display range
+cap <- 2.5
+
+clip <- function(x, cap) {
+  pmax(
+    pmin(
+      x,
+      cap
+    ),
+    -cap
+  )
+}
+
+h1 <- clip(
+  h1,
+  cap
+)
+
+h2 <- clip(
+  h2,
+  cap
+)
+
+h3 <- clip(
+  h3,
+  cap
+)
+
+h4 <- clip(
+  h4,
+  cap
+)
+
+
+############################################################
+##################### HEATMAP PLOTTING #####################
+############################################################
+
+col_fun <- circlize::colorRamp2(
+  c(
+    -cap,
+    -cap / 2,
+    0,
+    cap / 2,
+    cap
+  ),
+  c(
+    "#096fad",
+    "#92c5de",
+    "grey99",
+    "#f7c2ac",
+    "#c90422"
+  )
+)
+
+
+ht_width <- unit(
+  6,
+  "cm"
+)
+
+
+mk_ht <- function(
+  h,
+  id,
+  show_legend = TRUE
+) {
+  
   Heatmap(
     h,
     name = id,
@@ -512,15 +1048,38 @@ mk_ht <- function(h, id, show_legend = TRUE) {
     show_row_names = FALSE,
     show_column_names = FALSE,
     show_heatmap_legend = show_legend,
-    heatmap_legend_param = list(title = "Weighted z\n(log1p fit)"),
+    heatmap_legend_param = list(
+      title = "Global weighted\nz-score"
+    ),
     width = ht_width
   )
 }
 
-ht1 <- mk_ht(h1, "L1", show_legend = TRUE)
-ht2 <- mk_ht(h2, "L2", show_legend = FALSE)
-ht3 <- mk_ht(h3, "L3", show_legend = FALSE)
-ht4 <- mk_ht(h4, "L4", show_legend = FALSE)
+
+ht1 <- mk_ht(
+  h1,
+  "L1",
+  show_legend = TRUE
+)
+
+ht2 <- mk_ht(
+  h2,
+  "L2",
+  show_legend = FALSE
+)
+
+ht3 <- mk_ht(
+  h3,
+  "L3",
+  show_legend = FALSE
+)
+
+ht4 <- mk_ht(
+  h4,
+  "L4",
+  show_legend = FALSE
+)
+
 
 gene_names <- rowAnnotation(
   Gene = anno_text(
@@ -528,31 +1087,72 @@ gene_names <- rowAnnotation(
     which = "row",
     just = "right",
     location = 1,
-    gp = gpar(fontsize = 14, col = "black")
+    gp = gpar(
+      fontsize = 14,
+      col = "black"
+    )
   ),
   show_annotation_name = FALSE,
-  width = max_text_width(genes80_ordered, gp = gpar(fontsize = 7)) + unit(1, "mm")
+  width =
+    max_text_width(
+      genes80_ordered,
+      gp = gpar(
+        fontsize = 7
+      )
+    ) +
+    unit(
+      1,
+      "mm"
+    )
 )
+
 
 spacer <- rowAnnotation(
   foo = anno_text(
-    rep("", length(genes80_ordered)),
+    rep(
+      "",
+      length(genes80_ordered)
+    ),
     which = "row",
-    gp = gpar(col = NA, fontsize = 1)
+    gp = gpar(
+      col = NA,
+      fontsize = 1
+    )
   ),
   show_annotation_name = FALSE,
-  width = unit(1, "mm")
+  width = unit(
+    1,
+    "mm"
+  )
 )
 
-ht_list <- spacer + gene_names + ht1 + ht2 + ht3 + ht4
+
+ht_list <-
+  spacer +
+  gene_names +
+  ht1 +
+  ht2 +
+  ht3 +
+  ht4
+
 
 draw_heatmap_figure <- function() {
+  
   grid::grid.newpage()
   
   ComplexHeatmap::ht_opt(
-    ROW_ANNO_PADDING = unit(0, "mm"),
-    COLUMN_ANNO_PADDING = unit(0, "mm"),
-    DIMNAME_PADDING = unit(0, "mm")
+    ROW_ANNO_PADDING = unit(
+      0,
+      "mm"
+    ),
+    COLUMN_ANNO_PADDING = unit(
+      0,
+      "mm"
+    ),
+    DIMNAME_PADDING = unit(
+      0,
+      "mm"
+    )
   )
   
   draw(
@@ -562,45 +1162,105 @@ draw_heatmap_figure <- function() {
     merge_legends = TRUE
   )
   
-  for (nm in c("L1", "L2", "L3", "L4")) {
-    decorate_heatmap_body(nm, {
-      grid::grid.rect(
-        gp = grid::gpar(fill = NA, col = "black", lwd = 0.6)
-      )
-    })
+  
+  for (
+    nm in c(
+      "L1",
+      "L2",
+      "L3",
+      "L4"
+    )
+  ) {
+    
+    decorate_heatmap_body(
+      nm,
+      {
+        grid::grid.rect(
+          gp = grid::gpar(
+            fill = NA,
+            col = "black",
+            lwd = 0.6
+          )
+        )
+      }
+    )
   }
   
-  for (nm in c("L1", "L2", "L3", "L4")) {
-    decorate_heatmap_body(nm, {
-      txt <- grid::textGrob(
-        "Pseudotime",
-        x = unit(0, "npc"),
-        y = unit(-2, "mm"),
-        just = c("left", "top"),
-        gp = grid::gpar(fontsize = 20, col = "grey30")
-      )
-      
-      grid::grid.draw(txt)
-      
-      grid::grid.lines(
-        x = unit.c(
-          grobWidth(txt) + unit(1.5, "mm"),
-          unit(0.95, "npc")
-        ),
-        y = unit(c(-3, -3), "mm"),
-        arrow = grid::arrow(
-          type = "closed",
-          length = unit(1.8, "mm")
-        ),
-        gp = grid::gpar(
-          col = "grey10",
-          fill = "grey10",
-          lwd = 1
+  
+  for (
+    nm in c(
+      "L1",
+      "L2",
+      "L3",
+      "L4"
+    )
+  ) {
+    
+    decorate_heatmap_body(
+      nm,
+      {
+        
+        txt <- grid::textGrob(
+          "Pseudotime",
+          x = unit(
+            0,
+            "npc"
+          ),
+          y = unit(
+            -2,
+            "mm"
+          ),
+          just = c(
+            "left",
+            "top"
+          ),
+          gp = grid::gpar(
+            fontsize = 20,
+            col = "grey30"
+          )
         )
-      )
-    })
+        
+        grid::grid.draw(
+          txt
+        )
+        
+        grid::grid.lines(
+          x = unit.c(
+            grobWidth(txt) +
+              unit(
+                1.5,
+                "mm"
+              ),
+            unit(
+              0.95,
+              "npc"
+            )
+          ),
+          y = unit(
+            c(
+              -3,
+              -3
+            ),
+            "mm"
+          ),
+          arrow = grid::arrow(
+            type = "closed",
+            length = unit(
+              1.8,
+              "mm"
+            )
+          ),
+          gp = grid::gpar(
+            col = "grey10",
+            fill = "grey10",
+            lwd = 1
+          )
+        )
+      }
+    )
   }
 }
+
 
 png(
   filename = "~/Desktop/hTLS_mes_endpoint_heatmaps_weightedZ.png",
@@ -610,26 +1270,45 @@ png(
 )
 
 draw_heatmap_figure()
+
 dev.off()
 
 
+############################################################
+########### snRNA-seq-DERIVED LINEAGE MODULES ##############
+############################################################
+#
+# Modules used for bulk RNA-seq analyses.
+#
+# For each target population:
+#   - compare against all other annotated populations
+#   - exclude cells labelled "filtered"
+#   - adjusted P < 0.05
+#   - positive log2 fold-change
+#   - detected in >10% of target cells
+#   - retain top 100 genes ranked by log2 fold-change
+#
+############################################################
 
-
-## ============================================================
-## Deriving renal progenitor-like, somite progenitor-like, and 
-## neural-progenitor-like modules for bulk RNA-seq analysis
-## (Figures 3F, 3I, 4C, and S4R)
-## ============================================================
-
-
+DefaultAssay(hTLS) <- "SCT"
 
 Idents(hTLS) <- "full_cluster_annot"
 
-make_module <- function(object, target_cluster, n_genes = 100) {
+
+make_module <- function(
+  object,
+  target_cluster,
+  n_genes = 100
+) {
   
   other_clusters <- setdiff(
-    levels(Idents(object)),
-    c(target_cluster, "filtered")
+    levels(
+      Idents(object)
+    ),
+    c(
+      target_cluster,
+      "filtered"
+    )
   )
   
   FindMarkers(
@@ -639,15 +1318,23 @@ make_module <- function(object, target_cluster, n_genes = 100) {
     logfc.threshold = -Inf,
     min.pct = 0
   ) %>%
-    tibble::rownames_to_column("gene") %>%
+    tibble::rownames_to_column(
+      "gene"
+    ) %>%
     dplyr::filter(
       p_val_adj < 0.05,
       avg_log2FC > 0,
       pct.1 > 0.1
     ) %>%
-    dplyr::arrange(desc(avg_log2FC)) %>%
-    dplyr::slice_head(n = n_genes) %>%
-    dplyr::pull(gene)
+    dplyr::arrange(
+      desc(avg_log2FC)
+    ) %>%
+    dplyr::slice_head(
+      n = n_genes
+    ) %>%
+    dplyr::pull(
+      gene
+    )
 }
 
 
@@ -656,10 +1343,12 @@ renal_progenitor_like_module <- make_module(
   target_cluster = "Renal progenitor-like"
 )
 
+
 somite_progenitor_like_module <- make_module(
   hTLS,
   target_cluster = "Somite progenitor"
 )
+
 
 neural_tube_like_module <- make_module(
   hTLS,
