@@ -78,47 +78,15 @@ rownames(QP38Y5_matrix) <- QP38Y5_matrix$gene_name
 ################ SAMPLE NAME LOOKUP ##################
 ######################################################
 
-sample_key <- tibble(
-  sample_num = 1:36,
-  sample_name = c(
-    "iPSCs_dCas-T_rep_1",
-    "iPSCs_dCas-T_rep_2",
-    "iPSCs_dCas-T_rep_3",
-    "Loh_D3_ct_rep_1",
-    "Loh_D3_Dox_d0_rep_1",
-    "Loh_D3_Dox_d1_rep_1",
-    "Loh_D3_Dox_d2_rep_1",
-    "Loh_D3_ct_rep_2",
-    "Loh_D3_Dox_d0_rep_2",
-    "Loh_D3_Dox_d1_rep_2",
-    "Loh_D3_Dox_d2_rep_2",
-    "Loh_D3_ct_rep_3",
-    "Loh_D3_Dox_d0_rep_3",
-    "Loh_D3_Dox_d1_rep_3",
-    "Loh_D3_Dox_d2_rep_3",
-    "hTLS66_D0_ct_rep_1",
-    "hTLS66_D0_Dox_d-1_rep_1",
-    "hTLS66_D0_ct_rep_2",
-    "hTLS66_D0_Dox_d-1_rep_2",
-    "hTLS66_D0_ct_rep_3",
-    "hTLS66_D0_Dox_d-1_rep_3",
-    "hTLS66_D2_ct_rep_1",
-    "hTLS66_D2_Dox_d-1_rep_1",
-    "hTLS66_D2_ct_rep_2",
-    "hTLS66_D2_Dox_d-1_rep_2",
-    "hTLS66_D2_ct_rep_3",
-    "hTLS66_D2_Dox_d-1_rep_3",
-    "hTLS66_D5_ct_rep_1",
-    "hTLS66_D5_Dox_d-1_rep_1",
-    "hTLS66_D5_Dox_d1_rep_1",
-    "hTLS66_D5_ct_rep_2",
-    "hTLS66_D5_Dox_d-1_rep_2",
-    "hTLS66_D5_Dox_d1_rep_2",
-    "hTLS66_D5_ct_rep_3",
-    "hTLS66_D5_Dox_d-1_rep_3",
-    "hTLS66_D5_Dox_d1_rep_3"
-  )
+sample_key <- c(
+  "22" = "hTLS66_D2_ct_rep_1",
+  "23" = "hTLS66_D2_Dox_d-1_rep_1",
+  "24" = "hTLS66_D2_ct_rep_2",
+  "25" = "hTLS66_D2_Dox_d-1_rep_2",
+  "26" = "hTLS66_D2_ct_rep_3",
+  "27" = "hTLS66_D2_Dox_d-1_rep_3"
 )
+
 
 
 ######################################################
@@ -156,22 +124,6 @@ count_df <- data.frame(
 
 count_mat_all <- as.matrix(count_df)
 count_mat_all <- count_mat_all[complete.cases(count_mat_all), ]
-
-
-######################################################
-############## hTLS66 DAY 2 SAMPLES ##################
-######################################################
-
-samples_keep <- c(
-  "hTLS66_D2_ct_rep_1",
-  "hTLS66_D2_Dox_d-1_rep_1",
-  "hTLS66_D2_ct_rep_2",
-  "hTLS66_D2_Dox_d-1_rep_2",
-  "hTLS66_D2_ct_rep_3",
-  "hTLS66_D2_Dox_d-1_rep_3"
-)
-
-count_mat <- count_mat_all[, samples_keep]
 
 
 ######################################################
