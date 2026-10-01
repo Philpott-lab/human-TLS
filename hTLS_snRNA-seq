@@ -615,3 +615,53 @@ dev.off()
 
 
 
+## ============================================================
+## Deriving renal progenitor-like, somite progenitor-like, and 
+## neural-progenitor-like modules for bulk RNA-seq analysis
+## (Figures 3F, 3I, 4C, and S4R)
+## ============================================================
+
+
+
+Idents(hTLS) <- "full_cluster_annot"
+
+make_module <- function(object, target_cluster, n_genes = 100) {
+  
+  other_clusters <- setdiff(
+    levels(Idents(object)),
+    c(target_cluster, "filtered")
+  )
+  
+  FindMarkers(
+    object,
+    ident.1 = target_cluster,
+    ident.2 = other_clusters,
+    logfc.threshold = -Inf,
+    min.pct = 0
+  ) %>%
+    tibble::rownames_to_column("gene") %>%
+    dplyr::filter(
+      p_val_adj < 0.05,
+      avg_log2FC > 0,
+      pct.1 > 0.1
+    ) %>%
+    dplyr::arrange(desc(avg_log2FC)) %>%
+    dplyr::slice_head(n = n_genes) %>%
+    dplyr::pull(gene)
+}
+
+
+renal_progenitor_like_module <- make_module(
+  hTLS,
+  target_cluster = "Renal progenitor-like"
+)
+
+somite_progenitor_like_module <- make_module(
+  hTLS,
+  target_cluster = "Somite progenitor"
+)
+
+neural_tube_like_module <- make_module(
+  hTLS,
+  target_cluster = "Neural tube"
+)
