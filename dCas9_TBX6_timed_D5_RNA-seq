@@ -1,1 +1,1508 @@
+library(DESeq2)
+library(dplyr)
+library(tibble)
+library(tidyr)
+library(ggplot2)
+library(stringr)
+library(ggpubr)
+library(emmeans)
+library(msigdbr)
+library(patchwork)
 
+options(timeout = 120)
+
+######################################################
+#################### DIRECTORIES #####################
+######################################################
+
+# Change ONLY this path.
+#
+# It should point to the folder containing:
+#
+# QP38Y5_results/
+#   QP38Y5-expression-matrix.tsv
+#
+# module_markers/
+#   Kidney_markers_vsall_pos.csv
+#   Somite_markers_vsall_pos.csv
+#   Late_neu_markers_vsall_pos.csv
+#
+
+base_dir <- "/Users/jaypea/Desktop/QP38Y5_results"
+
+# Expression matrix
+expression_matrix_file <- file.path(
+  base_dir,
+  "QP38Y5-expression-matrix.tsv"
+)
+
+# Marker files used for lineage module scores
+marker_dir <- file.path(
+  base_dir,
+  "module_markers"
+)
+
+# Output folder
+plot_dir <- file.path(
+  base_dir,
+  "QP38Y5_D5_plots"
+)
+
+dir.create(
+  plot_dir,
+  showWarnings = FALSE,
+  recursive = TRUE
+)
+
+# Check required input files exist
+required_files <- c(
+  expression_matrix_file,
+  file.path(marker_dir, "Kidney_markers_vsall_pos.csv"),
+  file.path(marker_dir, "Somite_markers_vsall_pos.csv"),
+  file.path(marker_dir, "Late_neu_markers_vsall_pos.csv")
+)
+
+if (!all(file.exists(required_files))) {
+  stop(
+    "Missing input file(s):\n",
+    paste(
+      required_files[!file.exists(required_files)],
+      collapse = "\n"
+    )
+  )
+}
+
+
+######################################################
+#################### BULK RNA-SEQ ####################
+######################################################
+
+QP38Y5_matrix <- read.delim(
+  expression_matrix_file,
+  header = TRUE,
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+# Fill missing gene names with Ensembl IDs
+QP38Y5_matrix <- QP38Y5_matrix %>%
+  mutate(
+    gene_name = ifelse(
+      gene_name == "" | is.na(gene_name),
+      gene_id,
+      gene_name
+    )
+  )
+
+QP38Y5_matrix$gene_name <- make.unique(
+  QP38Y5_matrix$gene_name,
+  sep = "."
+)
+
+rownames(QP38Y5_matrix) <- QP38Y5_matrix$gene_name
+
+
+######################################################
+################ SAMPLE NAME LOOKUP ##################
+######################################################
+
+sample_key <- tibble(
+  sample_num = 1:36,
+  sample_name = c(
+    "iPSCs_dCas-T_rep_1",
+    "iPSCs_dCas-T_rep_2",
+    "iPSCs_dCas-T_rep_3",
+    "Loh_D3_ct_rep_1",
+    "Loh_D3_Dox_d0_rep_1",
+    "Loh_D3_Dox_d1_rep_1",
+    "Loh_D3_Dox_d2_rep_1",
+    "Loh_D3_ct_rep_2",
+    "Loh_D3_Dox_d0_rep_2",
+    "Loh_D3_Dox_d1_rep_2",
+    "Loh_D3_Dox_d2_rep_2",
+    "Loh_D3_ct_rep_3",
+    "Loh_D3_Dox_d0_rep_3",
+    "Loh_D3_Dox_d1_rep_3",
+    "Loh_D3_Dox_d2_rep_3",
+    "hTLS66_D0_ct_rep_1",
+    "hTLS66_D0_Dox_d-1_rep_1",
+    "hTLS66_D0_ct_rep_2",
+    "hTLS66_D0_Dox_d-1_rep_2",
+    "hTLS66_D0_ct_rep_3",
+    "hTLS66_D0_Dox_d-1_rep_3",
+    "hTLS66_D2_ct_rep_1",
+    "hTLS66_D2_Dox_d-1_rep_1",
+    "hTLS66_D2_ct_rep_2",
+    "hTLS66_D2_Dox_d-1_rep_2",
+    "hTLS66_D2_ct_rep_3",
+    "hTLS66_D2_Dox_d-1_rep_3",
+    "hTLS66_D5_ct_rep_1",
+    "hTLS66_D5_Dox_d-1_rep_1",
+    "hTLS66_D5_Dox_d1_rep_1",
+    "hTLS66_D5_ct_rep_2",
+    "hTLS66_D5_Dox_d-1_rep_2",
+    "hTLS66_D5_Dox_d1_rep_2",
+    "hTLS66_D5_ct_rep_3",
+    "hTLS66_D5_Dox_d-1_rep_3",
+    "hTLS66_D5_Dox_d1_rep_3"
+  )
+)
+
+
+######################################################
+################ ISOLATE COUNT DATA ##################
+######################################################
+
+QP38Y5_counts <- QP38Y5_matrix %>%
+  as_tibble(rownames = "gene") %>%
+  select(
+    gene,
+    matches("^QP38Y5_[0-9]+_count$")
+  ) %>%
+  mutate(
+    across(-gene, as.numeric)
+  ) %>%
+  column_to_rownames("gene")
+
+sample_num <- as.integer(
+  str_extract(
+    colnames(QP38Y5_counts),
+    "(?<=QP38Y5_)[0-9]+"
+  )
+)
+
+QP38Y5_counts <- QP38Y5_counts[
+  ,
+  order(sample_num)
+]
+
+sample_num <- sort(sample_num)
+
+colnames(QP38Y5_counts) <- sample_key$sample_name[
+  match(
+    sample_num,
+    sample_key$sample_num
+  )
+]
+
+count_df <- data.frame(
+  lapply(
+    QP38Y5_counts,
+    function(x) as.integer(as.character(x))
+  ),
+  row.names = rownames(QP38Y5_counts),
+  check.names = FALSE
+)
+
+count_mat_all <- as.matrix(count_df)
+
+count_mat_all <- count_mat_all[
+  complete.cases(count_mat_all),
+]
+
+
+######################################################
+############### hTLS66 DAY 5 SAMPLES #################
+######################################################
+
+samples_keep <- c(
+  "hTLS66_D5_ct_rep_1",
+  "hTLS66_D5_Dox_d-1_rep_1",
+  "hTLS66_D5_Dox_d1_rep_1",
+  "hTLS66_D5_ct_rep_2",
+  "hTLS66_D5_Dox_d-1_rep_2",
+  "hTLS66_D5_Dox_d1_rep_2",
+  "hTLS66_D5_ct_rep_3",
+  "hTLS66_D5_Dox_d-1_rep_3",
+  "hTLS66_D5_Dox_d1_rep_3"
+)
+
+count_mat <- count_mat_all[
+  ,
+  samples_keep
+]
+
+
+######################################################
+###################### METADATA ######################
+######################################################
+
+metaData <- data.frame(
+  sample = colnames(count_mat)
+) %>%
+  mutate(
+    replicate = str_extract(
+      sample,
+      "rep_[0-9]+"
+    ),
+    condition = case_when(
+      str_detect(sample, "_ct_") ~ "Control",
+      str_detect(sample, "Dox_d-1") ~ "Dox d-1",
+      str_detect(sample, "Dox_d1") ~ "Dox d1"
+    )
+  )
+
+rownames(metaData) <- metaData$sample
+metaData$sample <- NULL
+
+metaData$condition <- factor(
+  metaData$condition,
+  levels = c(
+    "Control",
+    "Dox d1",
+    "Dox d-1"
+  )
+)
+
+metaData$replicate <- factor(
+  metaData$replicate
+)
+
+stopifnot(
+  all(
+    rownames(metaData) ==
+      colnames(count_mat)
+  )
+)
+
+
+######################################################
+###################### DESEQ2 ########################
+######################################################
+
+dds <- DESeqDataSetFromMatrix(
+  countData = count_mat,
+  colData = metaData,
+  design = ~ replicate + condition
+)
+
+dds <- DESeq(dds)
+
+# Pairwise contrasts for Figure S4F
+res_Dox_dminus1_vs_Control <- results(
+  dds,
+  contrast = c(
+    "condition",
+    "Dox d-1",
+    "Control"
+  )
+)
+
+res_Dox_d1_vs_Control <- results(
+  dds,
+  contrast = c(
+    "condition",
+    "Dox d1",
+    "Control"
+  )
+)
+
+# Variance-stabilised expression for PCA and module scores
+vsdata <- vst(
+  dds,
+  blind = FALSE
+)
+
+vsd_mat <- assay(vsdata)
+
+
+######################################################
+############### COMMON PLOT LABELS ###################
+######################################################
+
+# Analysis labels
+condition_levels_analysis <- c(
+  "Control",
+  "Dox d1",
+  "Dox d-1"
+)
+
+# Figure labels
+condition_plot_levels <- c(
+  "Full-duration",
+  "Short-term",
+  "No/low"
+)
+
+condition_plot_key <- c(
+  "Control" = "Full-duration",
+  "Dox d1" = "Short-term",
+  "Dox d-1" = "No/low"
+)
+
+group_cols <- c(
+  "Full-duration" = "#9C0015",
+  "Short-term" = "#F0ADB5",
+  "No/low" = "#EEF8FC"
+)
+
+
+######################################################
+################ FIGURE S4E: PCA #####################
+######################################################
+
+# Extract PCA data so figure labels can be changed
+pca_data <- plotPCA(
+  vsdata,
+  intgroup = "condition",
+  returnData = TRUE
+)
+
+percent_var <- round(
+  100 * attr(
+    pca_data,
+    "percentVar"
+  ),
+  1
+)
+
+pca_data <- pca_data %>%
+  mutate(
+    condition_plot = case_when(
+      group == "Control" ~ "No Dox",
+      group == "Dox d1" ~ "Dox d1",
+      group == "Dox d-1" ~ "Dox d-1"
+    ),
+    condition_plot = factor(
+      condition_plot,
+      levels = c(
+        "No Dox",
+        "Dox d1",
+        "Dox d-1"
+      )
+    )
+  )
+
+pca_cols <- c(
+  "No Dox" = "#9C0015",
+  "Dox d1" = "#F0ADB5",
+  "Dox d-1" = "#EEF8FC"
+)
+
+p_pca <- ggplot(
+  pca_data,
+  aes(
+    x = PC1,
+    y = PC2,
+    fill = condition_plot
+  )
+) +
+  geom_point(
+    shape = 21,
+    size = 4,
+    colour = "black",
+    stroke = 0.6
+  ) +
+  scale_fill_manual(
+    values = pca_cols,
+    drop = FALSE
+  ) +
+  labs(
+    x = paste0(
+      "PC1 (",
+      percent_var[1],
+      "%)"
+    ),
+    y = paste0(
+      "PC2 (",
+      percent_var[2],
+      "%)"
+    ),
+    fill = NULL
+  ) +
+  theme_classic(base_size = 15) +
+  theme(
+    panel.border = element_rect(
+      colour = "black",
+      fill = NA,
+      linewidth = 1
+    ),
+    axis.title = element_text(
+      size = 15,
+      colour = "black"
+    ),
+    axis.text = element_text(
+      size = 15,
+      colour = "black"
+    ),
+    legend.text = element_text(
+      size = 12
+    )
+  )
+
+ggsave(
+  file.path(
+    plot_dir,
+    "QP38Y5_hTLS66_D5_PCA.pdf"
+  ),
+  p_pca,
+  width = 5,
+  height = 4
+)
+
+
+######################################################
+########### FIGURE S4F: 9-GENE PANEL #################
+######################################################
+
+panel_markers_top <- c(
+  "OSR1",
+  "PAX8",
+  "SIX2"
+)
+
+panel_markers_middle <- c(
+  "FOXC2",
+  "MEOX1",
+  "TCF15"
+)
+
+panel_markers_bottom <- c(
+  "ZIC1",
+  "RFX4",
+  "SOX2"
+)
+
+panel_markers <- c(
+  panel_markers_top,
+  panel_markers_middle,
+  panel_markers_bottom
+)
+
+
+######################################################
+######## NORMALIZED COUNTS FOR SELECTED GENES ########
+######################################################
+
+gene_counts <- counts(
+  dds,
+  normalized = TRUE
+) %>%
+  as.data.frame() %>%
+  rownames_to_column("gene") %>%
+  filter(
+    gene %in% panel_markers
+  ) %>%
+  pivot_longer(
+    -gene,
+    names_to = "sample",
+    values_to = "counts"
+  ) %>%
+  left_join(
+    as.data.frame(
+      colData(dds)
+    ) %>%
+      rownames_to_column("sample") %>%
+      select(
+        sample,
+        condition,
+        replicate
+      ),
+    by = "sample"
+  ) %>%
+  mutate(
+    condition_plot = unname(
+      condition_plot_key[
+        as.character(condition)
+      ]
+    ),
+    condition_plot = factor(
+      condition_plot,
+      levels = condition_plot_levels
+    ),
+    log_counts = log10(
+      counts + 1
+    )
+  )
+
+
+######################################################
+########### DESEQ2 FDR VALUES FOR S4F ################
+######################################################
+
+gene_stats <- bind_rows(
+  
+  as.data.frame(
+    res_Dox_dminus1_vs_Control
+  ) %>%
+    rownames_to_column("gene") %>%
+    filter(
+      gene %in% panel_markers
+    ) %>%
+    mutate(
+      group1 = "No/low",
+      group2 = "Full-duration",
+      comparison_order = 2L
+    ),
+  
+  as.data.frame(
+    res_Dox_d1_vs_Control
+  ) %>%
+    rownames_to_column("gene") %>%
+    filter(
+      gene %in% panel_markers
+    ) %>%
+    mutate(
+      group1 = "Short-term",
+      group2 = "Full-duration",
+      comparison_order = 1L
+    )
+) %>%
+  mutate(
+    p_label = case_when(
+      is.na(padj) ~ "FDR=NA",
+      padj < 0.001 ~ "FDR<0.001",
+      TRUE ~ paste0(
+        "FDR=",
+        signif(padj, 2)
+      )
+    )
+  )
+
+gene_ranges <- gene_counts %>%
+  group_by(gene) %>%
+  summarise(
+    y_max = max(
+      log_counts,
+      na.rm = TRUE
+    ),
+    y_min = min(
+      log_counts,
+      na.rm = TRUE
+    ),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    y_range = y_max - y_min,
+    y_range = ifelse(
+      !is.finite(y_range) |
+        y_range <= 0,
+      1,
+      y_range
+    )
+  )
+
+gene_stats <- gene_stats %>%
+  left_join(
+    gene_ranges,
+    by = "gene"
+  ) %>%
+  group_by(gene) %>%
+  arrange(
+    comparison_order,
+    .by_group = TRUE
+  ) %>%
+  mutate(
+    y.position =
+      y_max +
+      row_number() *
+      y_range *
+      0.25
+  ) %>%
+  ungroup()
+
+
+######################################################
+############ S4F GENE PLOT FUNCTION ##################
+######################################################
+
+plot_gene_panel <- function(
+    marker,
+    show_y_title = FALSE,
+    show_x_text = TRUE
+) {
+  
+  gene_dat <- gene_counts %>%
+    filter(
+      gene == marker
+    )
+  
+  gene_stat <- gene_stats %>%
+    filter(
+      gene == marker
+    ) %>%
+    as.data.frame()
+  
+  if (nrow(gene_dat) == 0) {
+    stop(
+      marker,
+      " was not found in the expression matrix."
+    )
+  }
+  
+  p <- ggplot(
+    gene_dat,
+    aes(
+      x = condition_plot,
+      y = log_counts
+    )
+  ) +
+    geom_boxplot(
+      aes(
+        fill = condition_plot
+      ),
+      outlier.shape = NA,
+      colour = "black",
+      linewidth = 0.6,
+      width = 0.6
+    ) +
+    geom_point(
+      aes(
+        fill = condition_plot
+      ),
+      position = position_jitter(
+        width = 0.08,
+        height = 0,
+        seed = 1
+      ),
+      shape = 21,
+      colour = "black",
+      stroke = 0.5,
+      size = 3
+    ) +
+    stat_pvalue_manual(
+      gene_stat,
+      label = "p_label",
+      xmin = "group1",
+      xmax = "group2",
+      y.position = "y.position",
+      tip.length = 0.01,
+      bracket.size = 0.4,
+      size = 3.2,
+      step.increase = 0
+    ) +
+    scale_fill_manual(
+      values = group_cols,
+      limits = condition_plot_levels,
+      drop = FALSE
+    ) +
+    scale_x_discrete(
+      limits = condition_plot_levels,
+      drop = FALSE,
+      expand = expansion(
+        add = c(
+          0.28,
+          0.28
+        )
+      )
+    ) +
+    scale_y_continuous(
+      expand = expansion(
+        mult = c(
+          0.02,
+          0.12
+        )
+      )
+    ) +
+    labs(
+      title = marker,
+      x = NULL,
+      y = if (
+        show_y_title
+      ) {
+        "log10(normalized counts + 1)"
+      } else {
+        NULL
+      }
+    ) +
+    theme_classic(
+      base_size = 12
+    ) +
+    theme(
+      plot.title = element_text(
+        face = "italic",
+        size = 16,
+        hjust = 0.5,
+        colour = "black"
+      ),
+      axis.text.x = element_text(
+        angle = 45,
+        hjust = 1,
+        vjust = 1,
+        size = 14,
+        colour = "black"
+      ),
+      axis.text.y = element_text(
+        size = 12,
+        colour = "black"
+      ),
+      axis.title.y = element_text(
+        size = 12,
+        colour = "black"
+      ),
+      axis.line = element_line(
+        colour = "black",
+        linewidth = 0.5
+      ),
+      axis.ticks = element_line(
+        colour = "black",
+        linewidth = 0.5
+      ),
+      legend.position = "none",
+      plot.margin = margin(
+        10,
+        14,
+        10,
+        14
+      )
+    )
+  
+  if (!show_y_title) {
+    p <- p +
+      theme(
+        axis.title.y =
+          element_blank()
+      )
+  }
+  
+  if (!show_x_text) {
+    p <- p +
+      theme(
+        axis.text.x =
+          element_blank(),
+        axis.ticks.x =
+          element_blank()
+      )
+  }
+  
+  p
+}
+
+
+######################################################
+################ BUILD S4F PANEL #####################
+######################################################
+
+# Top row
+p_osr1 <- plot_gene_panel(
+  "OSR1",
+  show_y_title = TRUE,
+  show_x_text = FALSE
+)
+
+p_pax8 <- plot_gene_panel(
+  "PAX8",
+  show_y_title = FALSE,
+  show_x_text = FALSE
+)
+
+p_six2 <- plot_gene_panel(
+  "SIX2",
+  show_y_title = FALSE,
+  show_x_text = FALSE
+)
+
+# Middle row
+p_foxc2 <- plot_gene_panel(
+  "FOXC2",
+  show_y_title = TRUE,
+  show_x_text = FALSE
+)
+
+p_meox1 <- plot_gene_panel(
+  "MEOX1",
+  show_y_title = FALSE,
+  show_x_text = FALSE
+)
+
+p_tcf15 <- plot_gene_panel(
+  "TCF15",
+  show_y_title = FALSE,
+  show_x_text = FALSE
+)
+
+# Bottom row
+p_zic1 <- plot_gene_panel(
+  "ZIC1",
+  show_y_title = TRUE,
+  show_x_text = TRUE
+)
+
+p_rfx4 <- plot_gene_panel(
+  "RFX4",
+  show_y_title = FALSE,
+  show_x_text = TRUE
+)
+
+p_sox2 <- plot_gene_panel(
+  "SOX2",
+  show_y_title = FALSE,
+  show_x_text = TRUE
+)
+
+p_gene_9panel <- (
+  p_osr1 |
+    p_pax8 |
+    p_six2
+) / (
+  p_foxc2 |
+    p_meox1 |
+    p_tcf15
+) / (
+  p_zic1 |
+    p_rfx4 |
+    p_sox2
+) +
+  plot_layout(
+    heights = c(
+      1,
+      1,
+      1
+    )
+  ) &
+  theme(
+    plot.margin = margin(
+      8,
+      6,
+      8,
+      6
+    )
+  )
+
+ggsave(
+  file.path(
+    plot_dir,
+    "QP38Y5_hTLS66_D5_selected9genes_panel.pdf"
+  ),
+  p_gene_9panel,
+  width = 6,
+  height = 8.5
+)
+
+
+######################################################
+######## FIGURE 4C / S4G: MODULE SCORES ##############
+######################################################
+
+# Lineage modules:
+# Top 100 positive scRNA-seq markers with pct.1 > 0.1
+
+read_top_module <- function(
+    filename,
+    n = 100
+) {
+  
+  read.csv(
+    file.path(
+      marker_dir,
+      filename
+    )
+  ) %>%
+    filter(
+      pct.1 > 0.1
+    ) %>%
+    slice_head(
+      n = n
+    ) %>%
+    pull(X) %>%
+    unique()
+}
+
+renal_genes <- read_top_module(
+  "Kidney_markers_vsall_pos.csv"
+)
+
+somite_genes <- read_top_module(
+  "Somite_markers_vsall_pos.csv"
+)
+
+neural_genes <- read_top_module(
+  "Late_neu_markers_vsall_pos.csv"
+)
+
+
+######################################################
+################ MSIGDB CELL STATE ###################
+######################################################
+
+msig_hallmark <- tryCatch(
+  msigdbr(
+    species = "Homo sapiens",
+    collection = "H"
+  ),
+  error = function(e) {
+    msigdbr(
+      species = "Homo sapiens",
+      category = "H"
+    )
+  }
+)
+
+get_hallmark_genes <- function(
+    hallmark_name
+) {
+  
+  msig_hallmark %>%
+    filter(
+      gs_name == hallmark_name
+    ) %>%
+    pull(gene_symbol) %>%
+    unique()
+}
+
+g2m_genes <- get_hallmark_genes(
+  "HALLMARK_G2M_CHECKPOINT"
+)
+
+apoptosis_genes <- get_hallmark_genes(
+  "HALLMARK_APOPTOSIS"
+)
+
+score_modules <- list(
+  "Renal module" =
+    renal_genes,
+  "Somite module" =
+    somite_genes,
+  "Neural module" =
+    neural_genes,
+  "G2/M cell-cycle score" =
+    g2m_genes,
+  "Apoptosis score" =
+    apoptosis_genes
+)
+
+
+######################################################
+############ CALCULATE MODULE SCORES #################
+######################################################
+
+calculate_module_score <- function(
+    genes,
+    module_name
+) {
+  
+  genes_present <- intersect(
+    unique(genes),
+    rownames(vsd_mat)
+  )
+  
+  if (
+    length(genes_present) < 2
+  ) {
+    stop(
+      module_name,
+      " has fewer than 2 genes present in the expression matrix."
+    )
+  }
+  
+  module_mat <- vsd_mat[
+    genes_present,
+    ,
+    drop = FALSE
+  ]
+  
+  # z-score each gene across samples
+  module_mat_z <- t(
+    scale(
+      t(module_mat)
+    )
+  )
+  
+  tibble(
+    sample =
+      colnames(module_mat_z),
+    module =
+      module_name,
+    module_score =
+      colMeans(
+        module_mat_z,
+        na.rm = TRUE
+      )
+  )
+}
+
+module_scores <- bind_rows(
+  lapply(
+    names(score_modules),
+    function(module_name) {
+      
+      calculate_module_score(
+        genes =
+          score_modules[[module_name]
+          ],
+        module_name =
+          module_name
+      )
+    }
+  )
+)
+
+module_scores <- module_scores %>%
+  left_join(
+    as.data.frame(
+      colData(dds)
+    ) %>%
+      rownames_to_column(
+        "sample"
+      ) %>%
+      select(
+        sample,
+        condition,
+        replicate
+      ),
+    by = "sample"
+  ) %>%
+  mutate(
+    condition = factor(
+      condition,
+      levels =
+        condition_levels_analysis
+    ),
+    replicate = factor(
+      replicate
+    ),
+    condition_plot = factor(
+      unname(
+        condition_plot_key[
+          as.character(
+            condition
+          )
+        ]
+      ),
+      levels =
+        condition_plot_levels
+    )
+  )
+
+
+######################################################
+############## MODULE STATISTICS #####################
+######################################################
+
+# Replicate-adjusted linear model +
+# Dunnett-adjusted comparisons against Control
+#
+# Control = Full-duration
+
+module_stats <- module_scores %>%
+  group_by(module) %>%
+  group_modify(
+    ~ {
+      
+      fit <- lm(
+        module_score ~
+          replicate +
+          condition,
+        data = .x
+      )
+      
+      emm <- emmeans(
+        fit,
+        ~ condition
+      )
+      
+      contrast(
+        emm,
+        method =
+          "trt.vs.ctrl",
+        ref =
+          "Control",
+        adjust =
+          "mvt"
+      ) %>%
+        as.data.frame() %>%
+        as_tibble()
+    }
+  ) %>%
+  ungroup() %>%
+  mutate(
+    group1 =
+      "Full-duration",
+    
+    group2 = case_when(
+      grepl(
+        "Dox d1",
+        contrast,
+        fixed = TRUE
+      ) ~ "Short-term",
+      
+      grepl(
+        "Dox d-1",
+        contrast,
+        fixed = TRUE
+      ) ~ "No/low",
+      
+      TRUE ~ NA_character_
+    ),
+    
+    comparison_order =
+      case_when(
+        group2 ==
+          "Short-term" ~ 1L,
+        group2 ==
+          "No/low" ~ 2L,
+        TRUE ~ 3L
+      ),
+    
+    sig_label =
+      case_when(
+        is.na(p.value) ~ "NA",
+        p.value < 0.0001 ~ "****",
+        p.value < 0.001 ~ "***",
+        p.value < 0.01 ~ "**",
+        p.value < 0.05 ~ "*",
+        TRUE ~ "ns"
+      )
+  )
+
+
+######################################################
+############ BRACKET POSITIONS #######################
+######################################################
+
+module_ranges <- module_scores %>%
+  group_by(module) %>%
+  summarise(
+    y_max = max(
+      module_score,
+      na.rm = TRUE
+    ),
+    y_min = min(
+      module_score,
+      na.rm = TRUE
+    ),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    y_range =
+      y_max -
+      y_min,
+    
+    y_range =
+      if_else(
+        !is.finite(y_range) |
+          y_range <= 0,
+        1,
+        y_range
+      )
+  )
+
+module_stats <- module_stats %>%
+  left_join(
+    module_ranges,
+    by = "module"
+  ) %>%
+  group_by(module) %>%
+  arrange(
+    comparison_order,
+    .by_group = TRUE
+  ) %>%
+  mutate(
+    y.position =
+      y_max +
+      0.20 * y_range +
+      (
+        row_number() - 1
+      ) *
+      0.23 *
+      y_range,
+    
+    xmin = match(
+      group1,
+      condition_plot_levels
+    ),
+    
+    xmax = match(
+      group2,
+      condition_plot_levels
+    ),
+    
+    tip_height =
+      0.035 *
+      y_range,
+    
+    label_y =
+      y.position +
+      0.055 *
+      y_range
+  ) %>%
+  ungroup()
+
+
+######################################################
+############ MODULE PLOT FUNCTION ####################
+######################################################
+
+plot_module_scores <- function(
+    plot_modules,
+    ncol,
+    width,
+    height,
+    filename
+) {
+  
+  panel_dat <- module_scores %>%
+    filter(
+      module %in% plot_modules
+    ) %>%
+    mutate(
+      module = factor(
+        module,
+        levels = plot_modules
+      ),
+      x_num = match(
+        condition_plot,
+        condition_plot_levels
+      )
+    )
+  
+  panel_stats <- module_stats %>%
+    filter(
+      module %in% plot_modules
+    ) %>%
+    mutate(
+      module = factor(
+        module,
+        levels = plot_modules
+      )
+    )
+  
+  p <- ggplot(
+    panel_dat,
+    aes(
+      x = x_num,
+      y = module_score
+    )
+  ) +
+    geom_hline(
+      yintercept = 0,
+      linetype = "dashed",
+      colour = "grey70",
+      linewidth = 0.4
+    ) +
+    geom_boxplot(
+      aes(
+        group = condition_plot,
+        fill = condition_plot
+      ),
+      width = 0.55,
+      outlier.shape = NA,
+      colour = "black",
+      linewidth = 0.6
+    ) +
+    geom_point(
+      aes(
+        fill = condition_plot
+      ),
+      shape = 21,
+      colour = "black",
+      stroke = 0.5,
+      size = 3,
+      position = position_jitter(
+        width = 0.08,
+        height = 0,
+        seed = 1
+      )
+    ) +
+    
+    # Horizontal significance brackets
+    geom_segment(
+      data = panel_stats,
+      aes(
+        x = xmin,
+        xend = xmax,
+        y = y.position,
+        yend = y.position
+      ),
+      inherit.aes = FALSE,
+      linewidth = 0.4
+    ) +
+    
+    # Left bracket tips
+    geom_segment(
+      data = panel_stats,
+      aes(
+        x = xmin,
+        xend = xmin,
+        y = y.position,
+        yend =
+          y.position -
+          tip_height
+      ),
+      inherit.aes = FALSE,
+      linewidth = 0.4
+    ) +
+    
+    # Right bracket tips
+    geom_segment(
+      data = panel_stats,
+      aes(
+        x = xmax,
+        xend = xmax,
+        y = y.position,
+        yend =
+          y.position -
+          tip_height
+      ),
+      inherit.aes = FALSE,
+      linewidth = 0.4
+    ) +
+    
+    # Significant comparisons
+    geom_text(
+      data = panel_stats %>%
+        filter(
+          sig_label != "ns"
+        ),
+      aes(
+        x =
+          (xmin + xmax) / 2,
+        y = label_y,
+        label = sig_label
+      ),
+      inherit.aes = FALSE,
+      size = 5,
+      fontface = "bold"
+    ) +
+    
+    # Non-significant comparisons
+    geom_text(
+      data = panel_stats %>%
+        filter(
+          sig_label == "ns"
+        ),
+      aes(
+        x =
+          (xmin + xmax) / 2,
+        y = label_y,
+        label = sig_label
+      ),
+      inherit.aes = FALSE,
+      size = 3.5
+    ) +
+    
+    facet_wrap(
+      ~ module,
+      nrow = 1,
+      ncol = ncol,
+      scales = "free_y"
+    ) +
+    
+    scale_fill_manual(
+      values = group_cols,
+      limits = condition_plot_levels,
+      drop = FALSE
+    ) +
+    
+    scale_x_continuous(
+      breaks = 1:3,
+      labels =
+        condition_plot_levels,
+      limits = c(
+        0.5,
+        3.5
+      )
+    ) +
+    
+    scale_y_continuous(
+      expand = expansion(
+        mult = c(
+          0.04,
+          0.32
+        )
+      )
+    ) +
+    
+    labs(
+      x = NULL,
+      y = "Module score"
+    ) +
+    
+    theme_classic(
+      base_size = 12
+    ) +
+    
+    theme(
+      strip.background =
+        element_blank(),
+      
+      strip.text =
+        element_text(
+          size = 12,
+          colour = "black"
+        ),
+      
+      axis.text.x =
+        element_text(
+          angle = 45,
+          hjust = 1,
+          vjust = 1,
+          size = 10,
+          colour = "black"
+        ),
+      
+      axis.text.y =
+        element_text(
+          size = 11,
+          colour = "black"
+        ),
+      
+      axis.title.y =
+        element_text(
+          size = 12,
+          colour = "black"
+        ),
+      
+      axis.line =
+        element_line(
+          colour = "black",
+          linewidth = 0.5
+        ),
+      
+      axis.ticks =
+        element_line(
+          colour = "black",
+          linewidth = 0.5
+        ),
+      
+      legend.position =
+        "none"
+    )
+  
+  ggsave(
+    file.path(
+      plot_dir,
+      filename
+    ),
+    p,
+    width = width,
+    height = height
+  )
+  
+  p
+}
+
+
+######################################################
+########### FIGURE 4C: LINEAGE MODULES ###############
+######################################################
+
+p_lineage_modules <- plot_module_scores(
+  plot_modules = c(
+    "Renal module",
+    "Somite module",
+    "Neural module"
+  ),
+  ncol = 3,
+  width = 6,
+  height = 3,
+  filename =
+    "lineage_module_boxplots_ANOVA_Dunnett.pdf"
+)
+
+
+######################################################
+######## FIGURE S4G: CELL-STATE MODULES ##############
+######################################################
+
+p_state_modules <- plot_module_scores(
+  plot_modules = c(
+    "G2/M cell-cycle score",
+    "Apoptosis score"
+  ),
+  ncol = 2,
+  width = 5,
+  height = 3,
+  filename =
+    "cell_state_module_boxplots_ANOVA_Dunnett.pdf"
+)
