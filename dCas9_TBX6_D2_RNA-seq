@@ -75,8 +75,10 @@ rownames(QP38Y5_matrix) <- QP38Y5_matrix$gene_name
 
 
 ######################################################
-################ SAMPLE NAME LOOKUP ##################
+########### hTLS66 DAY 2 SAMPLE LOOKUP ###############
 ######################################################
+
+# Only the 6 samples used for the Day 2 analysis
 
 sample_key <- c(
   "22" = "hTLS66_D2_ct_rep_1",
@@ -88,30 +90,36 @@ sample_key <- c(
 )
 
 
-
 ######################################################
 ################ ISOLATE COUNT DATA ##################
 ######################################################
 
-QP38Y5_counts <- QP38Y5_matrix %>%
-  as_tibble(rownames = "gene") %>%
-  select(gene, matches("^QP38Y5_[0-9]+_count$")) %>%
-  mutate(across(-gene, as.numeric)) %>%
-  column_to_rownames("gene")
+# Build the exact count-column names used in this analysis
 
-sample_num <- as.integer(
-  str_extract(
-    colnames(QP38Y5_counts),
-    "(?<=QP38Y5_)[0-9]+"
-  )
+count_columns <- paste0(
+  "QP38Y5_",
+  names(sample_key),
+  "_count"
 )
 
-QP38Y5_counts <- QP38Y5_counts[, order(sample_num)]
-sample_num <- sort(sample_num)
+# Select only the Day 2 count columns
 
-colnames(QP38Y5_counts) <- sample_key$sample_name[
-  match(sample_num, sample_key$sample_num)
-]
+QP38Y5_counts <- QP38Y5_matrix %>%
+  as_tibble(rownames = "gene") %>%
+  select(
+    gene,
+    all_of(count_columns)
+  ) %>%
+  mutate(
+    across(-gene, as.numeric)
+  ) %>%
+  column_to_rownames("gene")
+
+# Rename count columns using informative sample names
+
+colnames(QP38Y5_counts) <- unname(sample_key)
+
+# Force integer counts for DESeq2
 
 count_df <- data.frame(
   lapply(
@@ -122,8 +130,17 @@ count_df <- data.frame(
   check.names = FALSE
 )
 
-count_mat_all <- as.matrix(count_df)
-count_mat_all <- count_mat_all[complete.cases(count_mat_all), ]
+# Final count matrix used by DESeq2
+
+count_mat <- as.matrix(count_df)
+
+# Remove genes containing missing count values
+
+count_mat <- count_mat[
+  complete.cases(count_mat),
+  ,
+  drop = FALSE
+]
 
 
 ######################################################
@@ -134,10 +151,20 @@ metaData <- data.frame(
   sample = colnames(count_mat)
 ) %>%
   mutate(
-    replicate = str_extract(sample, "rep_[0-9]+"),
+    replicate = str_extract(
+      sample,
+      "rep_[0-9]+"
+    ),
     condition = case_when(
-      str_detect(sample, "hTLS66_D2_ct") ~ "D2 Control",
-      str_detect(sample, "hTLS66_D2_Dox_d-1") ~ "D2 Dox"
+      str_detect(
+        sample,
+        "hTLS66_D2_ct"
+      ) ~ "D2 Control",
+
+      str_detect(
+        sample,
+        "hTLS66_D2_Dox_d-1"
+      ) ~ "D2 Dox"
     )
   )
 
@@ -146,13 +173,21 @@ metaData$sample <- NULL
 
 metaData$condition <- factor(
   metaData$condition,
-  levels = c("D2 Control", "D2 Dox")
+  levels = c(
+    "D2 Control",
+    "D2 Dox"
+  )
 )
 
-metaData$replicate <- factor(metaData$replicate)
+metaData$replicate <- factor(
+  metaData$replicate
+)
 
 stopifnot(
-  all(rownames(metaData) == colnames(count_mat))
+  all(
+    rownames(metaData) ==
+      colnames(count_mat)
+  )
 )
 
 
@@ -176,6 +211,9 @@ res_D2_Dox_vs_Control <- results(
     "D2 Control"
   )
 )
+
+# Variance-stabilised expression for PCA,
+# correlation plots and module scores
 
 vsdata <- vst(
   dds,
