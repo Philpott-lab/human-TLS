@@ -41,7 +41,7 @@ expression_matrix_file <- file.path(
 marker_dir <- file.path(base_dir, "module_markers")
 
 # Output folder
-plot_dir <- file.path(base_dir, "QP38Y5_hTLS66_D2_plots")
+plot_dir <- file.path(base_dir, "QP38Y5_D2_plots")
 dir.create(plot_dir, showWarnings = FALSE, recursive = TRUE)
 
 
