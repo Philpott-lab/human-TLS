@@ -1,1 +1,983 @@
+library(DESeq2)
+library(dplyr)
+library(tibble)
+library(tidyr)
+library(ggplot2)
+library(pheatmap)
+library(stringr)
+library(ggpubr)
+library(emmeans)
+library(msigdbr)
+library(ggh4x)
 
+options(timeout = 120)
+
+######################################################
+#################### DIRECTORIES #####################
+######################################################
+
+# Change ONLY this path to the folder containing QP38Y5_results
+#
+# Example:
+
+base_dir <- "...../QP38Y5_results"
+
+# Expression matrix
+expression_matrix_file <- file.path(
+  base_dir,
+  "QP38Y5-expression-matrix.tsv"
+)
+
+# Marker files used for lineage module scores
+#
+# Put these three CSV files in a folder called "module_markers"
+# inside base_dir:
+#
+# module_markers/
+#   Kidney_markers_vsall_pos.csv
+#   Somite_markers_vsall_pos.csv
+#   Late_neu_markers_vsall_pos.csv
+
+marker_dir <- file.path(base_dir, "module_markers")
+
+# Output folder
+plot_dir <- file.path(base_dir, "QP38Y5_hTLS66_D2_plots")
+dir.create(plot_dir, showWarnings = FALSE, recursive = TRUE)
+
+
+######################################################
+#################### BULK RNA-SEQ ####################
+######################################################
+
+QP38Y5_matrix <- read.delim(
+  expression_matrix_file,
+  header = TRUE,
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+# Fill missing gene names with Ensembl IDs
+QP38Y5_matrix <- QP38Y5_matrix %>%
+  mutate(
+    gene_name = ifelse(
+      gene_name == "" | is.na(gene_name),
+      gene_id,
+      gene_name
+    )
+  )
+
+QP38Y5_matrix$gene_name <- make.unique(
+  QP38Y5_matrix$gene_name,
+  sep = "."
+)
+
+rownames(QP38Y5_matrix) <- QP38Y5_matrix$gene_name
+
+
+######################################################
+################ SAMPLE NAME LOOKUP ##################
+######################################################
+
+sample_key <- tibble(
+  sample_num = 1:36,
+  sample_name = c(
+    "iPSCs_dCas-T_rep_1",
+    "iPSCs_dCas-T_rep_2",
+    "iPSCs_dCas-T_rep_3",
+    "Loh_D3_ct_rep_1",
+    "Loh_D3_Dox_d0_rep_1",
+    "Loh_D3_Dox_d1_rep_1",
+    "Loh_D3_Dox_d2_rep_1",
+    "Loh_D3_ct_rep_2",
+    "Loh_D3_Dox_d0_rep_2",
+    "Loh_D3_Dox_d1_rep_2",
+    "Loh_D3_Dox_d2_rep_2",
+    "Loh_D3_ct_rep_3",
+    "Loh_D3_Dox_d0_rep_3",
+    "Loh_D3_Dox_d1_rep_3",
+    "Loh_D3_Dox_d2_rep_3",
+    "hTLS66_D0_ct_rep_1",
+    "hTLS66_D0_Dox_d-1_rep_1",
+    "hTLS66_D0_ct_rep_2",
+    "hTLS66_D0_Dox_d-1_rep_2",
+    "hTLS66_D0_ct_rep_3",
+    "hTLS66_D0_Dox_d-1_rep_3",
+    "hTLS66_D2_ct_rep_1",
+    "hTLS66_D2_Dox_d-1_rep_1",
+    "hTLS66_D2_ct_rep_2",
+    "hTLS66_D2_Dox_d-1_rep_2",
+    "hTLS66_D2_ct_rep_3",
+    "hTLS66_D2_Dox_d-1_rep_3",
+    "hTLS66_D5_ct_rep_1",
+    "hTLS66_D5_Dox_d-1_rep_1",
+    "hTLS66_D5_Dox_d1_rep_1",
+    "hTLS66_D5_ct_rep_2",
+    "hTLS66_D5_Dox_d-1_rep_2",
+    "hTLS66_D5_Dox_d1_rep_2",
+    "hTLS66_D5_ct_rep_3",
+    "hTLS66_D5_Dox_d-1_rep_3",
+    "hTLS66_D5_Dox_d1_rep_3"
+  )
+)
+
+
+######################################################
+################ ISOLATE COUNT DATA ##################
+######################################################
+
+QP38Y5_counts <- QP38Y5_matrix %>%
+  as_tibble(rownames = "gene") %>%
+  select(gene, matches("^QP38Y5_[0-9]+_count$")) %>%
+  mutate(across(-gene, as.numeric)) %>%
+  column_to_rownames("gene")
+
+sample_num <- as.integer(
+  str_extract(
+    colnames(QP38Y5_counts),
+    "(?<=QP38Y5_)[0-9]+"
+  )
+)
+
+QP38Y5_counts <- QP38Y5_counts[, order(sample_num)]
+sample_num <- sort(sample_num)
+
+colnames(QP38Y5_counts) <- sample_key$sample_name[
+  match(sample_num, sample_key$sample_num)
+]
+
+count_df <- data.frame(
+  lapply(
+    QP38Y5_counts,
+    function(x) as.integer(as.character(x))
+  ),
+  row.names = rownames(QP38Y5_counts),
+  check.names = FALSE
+)
+
+count_mat_all <- as.matrix(count_df)
+count_mat_all <- count_mat_all[complete.cases(count_mat_all), ]
+
+
+######################################################
+############## hTLS66 DAY 2 SAMPLES ##################
+######################################################
+
+samples_keep <- c(
+  "hTLS66_D2_ct_rep_1",
+  "hTLS66_D2_Dox_d-1_rep_1",
+  "hTLS66_D2_ct_rep_2",
+  "hTLS66_D2_Dox_d-1_rep_2",
+  "hTLS66_D2_ct_rep_3",
+  "hTLS66_D2_Dox_d-1_rep_3"
+)
+
+count_mat <- count_mat_all[, samples_keep]
+
+
+######################################################
+###################### METADATA ######################
+######################################################
+
+metaData <- data.frame(
+  sample = colnames(count_mat)
+) %>%
+  mutate(
+    replicate = str_extract(sample, "rep_[0-9]+"),
+    condition = case_when(
+      str_detect(sample, "hTLS66_D2_ct") ~ "D2 Control",
+      str_detect(sample, "hTLS66_D2_Dox_d-1") ~ "D2 Dox"
+    )
+  )
+
+rownames(metaData) <- metaData$sample
+metaData$sample <- NULL
+
+metaData$condition <- factor(
+  metaData$condition,
+  levels = c("D2 Control", "D2 Dox")
+)
+
+metaData$replicate <- factor(metaData$replicate)
+
+stopifnot(
+  all(rownames(metaData) == colnames(count_mat))
+)
+
+
+######################################################
+###################### DESEQ2 ########################
+######################################################
+
+dds <- DESeqDataSetFromMatrix(
+  countData = count_mat,
+  colData = metaData,
+  design = ~ replicate + condition
+)
+
+dds <- DESeq(dds)
+
+res_D2_Dox_vs_Control <- results(
+  dds,
+  contrast = c(
+    "condition",
+    "D2 Dox",
+    "D2 Control"
+  )
+)
+
+vsdata <- vst(
+  dds,
+  blind = FALSE
+)
+
+vsd_mat <- assay(vsdata)
+
+group_cols <- c(
+  "D2 Control" = "#B2DF8A",
+  "D2 Dox" = "#33A02C"
+)
+
+
+######################################################
+############ FIGURE S3N: CORRELATION #################
+######################################################
+
+sample_cor_matrix <- cor(vsd_mat)
+
+ann_colors <- list(
+  condition = group_cols
+)
+
+pheatmap(
+  sample_cor_matrix,
+  annotation_col = metaData["condition"],
+  annotation_colors = ann_colors,
+  color = colorRampPalette(
+    c("white", "#005824")
+  )(100),
+  clustering_distance_rows = "correlation",
+  clustering_distance_cols = "correlation",
+  clustering_method = "complete",
+  border_color = NA,
+  show_rownames = TRUE,
+  show_colnames = TRUE,
+  fontsize = 9,
+  main = "",
+  legend = TRUE,
+  treeheight_row = 2,
+  treeheight_col = 2,
+  cellwidth = 12,
+  cellheight = 12,
+  filename = file.path(
+    plot_dir,
+    "QP38Y5_hTLS66_D2_sample_correlation_heatmap.pdf"
+  )
+)
+
+
+######################################################
+################ FIGURE S3O: PCA #####################
+######################################################
+
+p_pca <- plotPCA(
+  vsdata,
+  intgroup = "condition",
+  pcsToUse = 1:2
+) +
+  scale_colour_manual(
+    values = group_cols
+  ) +
+  theme(
+    panel.border = element_rect(
+      colour = "black",
+      fill = NA,
+      linewidth = 1
+    ),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_rect(
+      fill = "white",
+      colour = "white"
+    ),
+    axis.title = element_text(size = 15),
+    axis.text = element_text(size = 15)
+  )
+
+ggsave(
+  file.path(
+    plot_dir,
+    "QP38Y5_hTLS66_D2_PCA.pdf"
+  ),
+  p_pca,
+  width = 5,
+  height = 4
+)
+
+
+######################################################
+######## FIGURES S3P-R: MARKER GENE BOXPLOTS #########
+######################################################
+
+# Figure S3P:
+#   TBX6
+#
+# Figure S3Q:
+#   MEOX1
+#   TCF15
+#   FOXC1
+#
+# Figure S3R:
+#   OSR1
+#   LHX1
+#   CITED1
+#   EYA1
+
+genes_to_plot <- c(
+  "TBX6",
+  "MEOX1",
+  "TCF15",
+  "FOXC1",
+  "OSR1",
+  "LHX1",
+  "CITED1",
+  "EYA1"
+)
+
+condition_plot_levels <- c(
+  "Control",
+  "Dox"
+)
+
+group_cols_boxplot <- c(
+  "Control" = "#FFFFFF",
+  "Dox" = "#2E7D32"
+)
+
+
+######################################################
+############ NORMALIZED COUNTS #######################
+######################################################
+
+gene_counts_all <- counts(
+  dds,
+  normalized = TRUE
+) %>%
+  as.data.frame() %>%
+  rownames_to_column("gene") %>%
+  filter(gene %in% genes_to_plot) %>%
+  pivot_longer(
+    -gene,
+    names_to = "sample",
+    values_to = "counts"
+  ) %>%
+  left_join(
+    as.data.frame(colData(dds)) %>%
+      rownames_to_column("sample") %>%
+      select(
+        sample,
+        condition,
+        replicate
+      ),
+    by = "sample"
+  ) %>%
+  mutate(
+    condition_plot = case_when(
+      condition == "D2 Control" ~ "Control",
+      condition == "D2 Dox" ~ "Dox"
+    ),
+    condition_plot = factor(
+      condition_plot,
+      levels = condition_plot_levels
+    ),
+    log_counts = log10(counts + 1)
+  )
+
+
+######################################################
+################### DESEQ2 FDR #######################
+######################################################
+
+gene_stats <- as.data.frame(
+  res_D2_Dox_vs_Control
+) %>%
+  rownames_to_column("gene") %>%
+  filter(gene %in% genes_to_plot) %>%
+  mutate(
+    group1 = "Control",
+    group2 = "Dox",
+    p_label = case_when(
+      is.na(padj) ~ "FDR=NA",
+      padj < 0.001 ~ "FDR<0.001",
+      TRUE ~ paste0(
+        "FDR=",
+        signif(padj, 2)
+      )
+    )
+  )
+
+y_positions <- gene_counts_all %>%
+  group_by(gene) %>%
+  summarise(
+    y_max = max(log_counts),
+    y_min = min(log_counts),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    y_range = y_max - y_min,
+    y_range = ifelse(
+      y_range == 0,
+      1,
+      y_range
+    ),
+    y.position = y_max + 0.25 * y_range
+  )
+
+gene_stats <- gene_stats %>%
+  left_join(
+    y_positions,
+    by = "gene"
+  )
+
+
+######################################################
+################ GENE PLOT FUNCTION ##################
+######################################################
+
+make_gene_plot <- function(marker) {
+  
+  gene_dat <- gene_counts_all %>%
+    filter(gene == marker)
+  
+  gene_stat <- gene_stats %>%
+    filter(gene == marker)
+  
+  # Skip genes not present in the matrix
+  if (nrow(gene_dat) == 0) {
+    message(
+      marker,
+      " not found in expression matrix - skipping."
+    )
+    return(NULL)
+  }
+  
+  p_gene <- ggplot(
+    gene_dat,
+    aes(
+      x = condition_plot,
+      y = log_counts
+    )
+  ) +
+    geom_boxplot(
+      aes(fill = condition_plot),
+      outlier.shape = NA,
+      colour = "black",
+      linewidth = 0.6,
+      width = 0.6
+    ) +
+    geom_point(
+      aes(fill = condition_plot),
+      position = position_jitter(
+        width = 0.08,
+        height = 0
+      ),
+      shape = 21,
+      colour = "black",
+      stroke = 0.5,
+      size = 3
+    ) +
+    stat_pvalue_manual(
+      gene_stat,
+      label = "p_label",
+      xmin = "group1",
+      xmax = "group2",
+      y.position = "y.position",
+      tip.length = 0.01,
+      bracket.size = 0.4,
+      size = 5,
+      vjust = -0.6
+    ) +
+    scale_fill_manual(
+      values = group_cols_boxplot
+    ) +
+    scale_y_continuous(
+      expand = expansion(
+        mult = c(0.02, 0.16)
+      )
+    ) +
+    labs(
+      title = marker,
+      x = NULL,
+      y = "log10 normalized counts + 1"
+    ) +
+    theme_classic(base_size = 12) +
+    theme(
+      plot.title = element_text(
+        face = "italic",
+        size = 22,
+        hjust = 0.5,
+        colour = "black"
+      ),
+      axis.text.x = element_text(
+        size = 16,
+        colour = "black"
+      ),
+      axis.text.y = element_text(
+        size = 18,
+        colour = "black"
+      ),
+      axis.title.y = element_text(
+        size = 18,
+        colour = "black"
+      ),
+      legend.position = "none"
+    )
+  
+  ggsave(
+    file.path(
+      plot_dir,
+      paste0(
+        "QP38Y5_hTLS66_D2_",
+        marker,
+        "_boxplot_TBX6_knockdown_vs_Control_DESeq2_FDR.pdf"
+      )
+    ),
+    p_gene,
+    width = 4.5,
+    height = 5
+  )
+}
+
+
+######################################################
+################ SAVE GENE PLOTS #####################
+######################################################
+
+for (marker in genes_to_plot) {
+  make_gene_plot(marker)
+}
+
+
+######################################################
+########## FIGURE 3I / S3S: MODULE SCORES ############
+######################################################
+
+# scRNA-seq marker files
+
+kidney_module <- read.csv(
+  file.path(
+    marker_dir,
+    "Kidney_markers_vsall_pos.csv"
+  )
+)
+
+somite_module <- read.csv(
+  file.path(
+    marker_dir,
+    "Somite_markers_vsall_pos.csv"
+  )
+)
+
+neural_module <- read.csv(
+  file.path(
+    marker_dir,
+    "Late_neu_markers_vsall_pos.csv"
+  )
+)
+
+renal_genes <- kidney_module %>%
+  filter(pct.1 > 0.1) %>%
+  slice_head(n = 100) %>%
+  pull(X)
+
+somite_genes <- somite_module %>%
+  filter(pct.1 > 0.1) %>%
+  slice_head(n = 100) %>%
+  pull(X)
+
+neural_genes <- neural_module %>%
+  filter(pct.1 > 0.1) %>%
+  slice_head(n = 100) %>%
+  pull(X)
+
+
+######################################################
+################ MSIGDB MODULES ######################
+######################################################
+
+msig_hallmark <- tryCatch(
+  msigdbr(
+    species = "Homo sapiens",
+    collection = "H"
+  ),
+  error = function(e) {
+    msigdbr(
+      species = "Homo sapiens",
+      category = "H"
+    )
+  }
+)
+
+get_hallmark_genes <- function(name) {
+  
+  msig_hallmark %>%
+    filter(gs_name == name) %>%
+    pull(gene_symbol) %>%
+    unique()
+}
+
+g2m_genes <- get_hallmark_genes(
+  "HALLMARK_G2M_CHECKPOINT"
+)
+
+apoptosis_genes <- get_hallmark_genes(
+  "HALLMARK_APOPTOSIS"
+)
+
+
+######################################################
+################ DEFINE MODULES ######################
+######################################################
+
+score_modules <- list(
+  "Renal module" = renal_genes,
+  "Somite module" = somite_genes,
+  "Neural module" = neural_genes,
+  "G2/M cell-cycle score" = g2m_genes,
+  "Apoptosis score" = apoptosis_genes
+)
+
+
+######################################################
+############ CALCULATE MODULE SCORES #################
+######################################################
+
+calculate_module_score <- function(
+    genes,
+    module_name
+) {
+  
+  genes_present <- intersect(
+    unique(genes),
+    rownames(vsd_mat)
+  )
+  
+  if (length(genes_present) < 2) {
+    stop(
+      module_name,
+      ": fewer than two genes found."
+    )
+  }
+  
+  module_mat <- vsd_mat[
+    genes_present,
+    ,
+    drop = FALSE
+  ]
+  
+  module_mat_z <- t(
+    scale(
+      t(module_mat)
+    )
+  )
+  
+  tibble(
+    sample = colnames(vsd_mat),
+    module = module_name,
+    module_score = colMeans(
+      module_mat_z,
+      na.rm = TRUE
+    )
+  )
+}
+
+module_scores_all <- bind_rows(
+  lapply(
+    names(score_modules),
+    function(module_name) {
+      calculate_module_score(
+        score_modules[[module_name]],
+        module_name
+      )
+    }
+  )
+)
+
+module_scores_all <- module_scores_all %>%
+  left_join(
+    as.data.frame(colData(dds)) %>%
+      rownames_to_column("sample") %>%
+      select(
+        sample,
+        condition,
+        replicate
+      ),
+    by = "sample"
+  ) %>%
+  mutate(
+    condition_plot = case_when(
+      condition == "D2 Control" ~ "Control",
+      condition == "D2 Dox" ~ "Dox"
+    ),
+    condition_plot = factor(
+      condition_plot,
+      levels = c(
+        "Control",
+        "Dox"
+      )
+    )
+  )
+
+
+######################################################
+################ MODULE STATISTICS ###################
+######################################################
+
+module_stats <- module_scores_all %>%
+  group_by(module) %>%
+  group_modify(~ {
+    
+    fit <- lm(
+      module_score ~ replicate + condition,
+      data = .x
+    )
+    
+    emm <- emmeans(
+      fit,
+      ~ condition
+    )
+    
+    contrast(
+      emm,
+      method = "trt.vs.ctrl",
+      ref = "D2 Control",
+      adjust = "none"
+    ) %>%
+      as.data.frame() %>%
+      as_tibble() %>%
+      transmute(
+        group1 = "Control",
+        group2 = "Dox",
+        p.value = p.value
+      )
+  }) %>%
+  ungroup() %>%
+  mutate(
+    p_label = case_when(
+      p.value < 0.001 ~ "p<0.001",
+      TRUE ~ paste0(
+        "p=",
+        signif(p.value, 2)
+      )
+    )
+  )
+
+module_y <- module_scores_all %>%
+  group_by(module) %>%
+  summarise(
+    y_max = max(module_score),
+    y_min = min(module_score),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    y_min_plot = pmin(
+      y_min,
+      -1
+    ),
+    y_range = y_max - y_min_plot,
+    y.position = y_max + 0.20 * y_range
+  )
+
+module_stats <- module_stats %>%
+  left_join(
+    module_y,
+    by = "module"
+  )
+
+
+######################################################
+################ MODULE PLOT FUNCTION ################
+######################################################
+
+make_module_panel <- function(
+    modules,
+    panel_title,
+    ncol_panel
+) {
+  
+  panel_dat <- module_scores_all %>%
+    filter(module %in% modules) %>%
+    mutate(
+      module = factor(
+        module,
+        levels = modules
+      )
+    )
+  
+  panel_stats <- module_stats %>%
+    filter(module %in% modules) %>%
+    mutate(
+      module = factor(
+        module,
+        levels = modules
+      )
+    )
+  
+  lower_anchor <- tibble(
+    module = factor(
+      modules,
+      levels = modules
+    ),
+    condition_plot = factor(
+      "Control",
+      levels = c(
+        "Control",
+        "Dox"
+      )
+    ),
+    module_score = -1
+  )
+  
+  ggplot(
+    panel_dat,
+    aes(
+      x = condition_plot,
+      y = module_score
+    )
+  ) +
+    geom_blank(
+      data = lower_anchor,
+      aes(
+        x = condition_plot,
+        y = module_score
+      ),
+      inherit.aes = FALSE
+    ) +
+    geom_hline(
+      yintercept = 0,
+      linetype = "dashed",
+      colour = "grey70",
+      linewidth = 0.4
+    ) +
+    geom_boxplot(
+      aes(fill = condition_plot),
+      outlier.shape = NA,
+      colour = "black",
+      linewidth = 0.6,
+      width = 0.6
+    ) +
+    geom_point(
+      aes(fill = condition_plot),
+      position = position_jitter(
+        width = 0.08,
+        height = 0
+      ),
+      shape = 21,
+      colour = "black",
+      stroke = 0.5,
+      size = 3
+    ) +
+    stat_pvalue_manual(
+      panel_stats,
+      label = "p_label",
+      xmin = "group1",
+      xmax = "group2",
+      y.position = "y.position",
+      tip.length = 0.01,
+      bracket.size = 0.4,
+      size = 5,
+      vjust = -0.6
+    ) +
+    ggh4x::facet_wrap2(
+      ~ module,
+      scales = "free_y",
+      ncol = ncol_panel,
+      axes = "all",
+      remove_labels = "none"
+    ) +
+    scale_fill_manual(
+      values = group_cols_boxplot
+    ) +
+    scale_y_continuous(
+      expand = expansion(
+        mult = c(0, 0.18)
+      )
+    ) +
+    labs(
+      title = panel_title,
+      x = NULL,
+      y = "Module score\n(mean z-scored VST expression)"
+    ) +
+    theme_classic(base_size = 12) +
+    theme(
+      plot.title = element_text(
+        size = 15,
+        hjust = 0.5
+      ),
+      strip.background = element_blank(),
+      strip.text = element_text(
+        size = 13
+      ),
+      axis.text.x = element_text(
+        size = 13,
+        colour = "black"
+      ),
+      axis.text.y = element_text(
+        size = 13,
+        colour = "black"
+      ),
+      axis.title.y = element_text(
+        size = 15,
+        colour = "black"
+      ),
+      legend.position = "none"
+    )
+}
+
+
+######################################################
+############### FIGURE 3I: LINEAGE ###################
+######################################################
+
+p_lineage_modules <- make_module_panel(
+  modules = c(
+    "Renal module",
+    "Somite module",
+    "Neural module"
+  ),
+  panel_title = "Lineage modules",
+  ncol_panel = 3
+)
+
+ggsave(
+  file.path(
+    plot_dir,
+    "QP38Y5_hTLS66_D2_lineage_module_boxplots_Control_vs_Dox.pdf"
+  ),
+  p_lineage_modules,
+  width = 9,
+  height = 4
+)
+
+
+######################################################
+############ FIGURE S3S: CELL-STATE ##################
+######################################################
+
+p_state_modules <- make_module_panel(
+  modules = c(
+    "G2/M cell-cycle score",
+    "Apoptosis score"
+  ),
+  panel_title = "Cell-state modules",
+  ncol_panel = 2
+)
+
+ggsave(
+  file.path(
+    plot_dir,
+    "QP38Y5_hTLS66_D2_cell_state_module_boxplots_Control_vs_Dox.pdf"
+  ),
+  p_state_modules,
+  width = 4.2,
+  height = 3.2
+)
