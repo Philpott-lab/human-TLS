@@ -20,7 +20,7 @@ options(timeout = 120)
 #
 # Example:
 
-base_dir <- "...../QP38Y5_results"
+base_dir <- "..../QP38Y5_results"
 
 # Expression matrix
 expression_matrix_file <- file.path(
@@ -160,7 +160,7 @@ metaData <- data.frame(
         sample,
         "hTLS66_D2_ct"
       ) ~ "D2 Control",
-
+      
       str_detect(
         sample,
         "hTLS66_D2_Dox_d-1"
@@ -538,436 +538,313 @@ make_gene_plot <- function(marker) {
 }
 
 
-######################################################
-################ SAVE GENE PLOTS #####################
-######################################################
-
-for (marker in genes_to_plot) {
-  make_gene_plot(marker)
-}
-
 
 ######################################################
 ########## FIGURE 3I / S3S: MODULE SCORES ############
 ######################################################
 
-# scRNA-seq marker files
+condition_plot_levels <- c("Control", "Dox")
+group_cols_boxplot <- c("Control" = "#FFFFFF", "Dox" = "#2E7D32")
+module_levels <- c("Somite module", "Renal module", "Neural module",
+                   "G2/M cell-cycle score", "Apoptosis score")
 
-kidney_module <- read.csv(
-  file.path(
-    marker_dir,
-    "Kidney_markers_vsall_pos.csv"
-  )
-)
+######################################################
+################ LINEAGE MODULES #####################
+######################################################
 
-somite_module <- read.csv(
-  file.path(
-    marker_dir,
-    "Somite_markers_vsall_pos.csv"
-  )
-)
+kidney_module <- read.csv(file.path(marker_dir, "Kidney_markers_vsall_pos.csv"))
+somite_module <- read.csv(file.path(marker_dir, "Somite_markers_vsall_pos.csv"))
+neural_module <- read.csv(file.path(marker_dir, "Late_neu_markers_vsall_pos.csv"))
 
-neural_module <- read.csv(
-  file.path(
-    marker_dir,
-    "Late_neu_markers_vsall_pos.csv"
-  )
-)
-
-renal_genes <- kidney_module %>%
-  filter(pct.1 > 0.1) %>%
-  slice_head(n = 100) %>%
-  pull(X)
-
-somite_genes <- somite_module %>%
-  filter(pct.1 > 0.1) %>%
-  slice_head(n = 100) %>%
-  pull(X)
-
-neural_genes <- neural_module %>%
-  filter(pct.1 > 0.1) %>%
-  slice_head(n = 100) %>%
-  pull(X)
-
+renal_genes <- kidney_module %>% filter(pct.1 > 0.1) %>% slice_head(n = 100) %>% pull(X) %>% as.character() %>% unique()
+somite_genes <- somite_module %>% filter(pct.1 > 0.1) %>% slice_head(n = 100) %>% pull(X) %>% as.character() %>% unique()
+neural_genes <- neural_module %>% filter(pct.1 > 0.1) %>% slice_head(n = 100) %>% pull(X) %>% as.character() %>% unique()
 
 ######################################################
 ################ MSIGDB MODULES ######################
 ######################################################
 
 msig_hallmark <- tryCatch(
-  msigdbr(
-    species = "Homo sapiens",
-    collection = "H"
-  ),
-  error = function(e) {
-    msigdbr(
-      species = "Homo sapiens",
-      category = "H"
-    )
-  }
+  msigdbr(species = "Homo sapiens", collection = "H"),
+  error = function(e) msigdbr(species = "Homo sapiens", category = "H")
 )
 
 get_hallmark_genes <- function(name) {
-  
-  msig_hallmark %>%
-    filter(gs_name == name) %>%
-    pull(gene_symbol) %>%
-    unique()
+  msig_hallmark %>% filter(gs_name == name) %>% pull(gene_symbol) %>% unique()
 }
 
-g2m_genes <- get_hallmark_genes(
-  "HALLMARK_G2M_CHECKPOINT"
-)
-
-apoptosis_genes <- get_hallmark_genes(
-  "HALLMARK_APOPTOSIS"
-)
-
-
-######################################################
-################ DEFINE MODULES ######################
-######################################################
+g2m_genes <- get_hallmark_genes("HALLMARK_G2M_CHECKPOINT")
+apoptosis_genes <- get_hallmark_genes("HALLMARK_APOPTOSIS")
 
 score_modules <- list(
-  "Renal module" = renal_genes,
   "Somite module" = somite_genes,
+  "Renal module" = renal_genes,
   "Neural module" = neural_genes,
   "G2/M cell-cycle score" = g2m_genes,
   "Apoptosis score" = apoptosis_genes
 )
 
-
 ######################################################
 ############ CALCULATE MODULE SCORES #################
 ######################################################
 
-calculate_module_score <- function(
-    genes,
-    module_name
-) {
+calculate_module_score <- function(genes, module_name) {
+  genes_present <- intersect(unique(as.character(genes)), rownames(vsd_mat))
+  if (length(genes_present) < 2) stop(module_name, ": fewer than two genes found.")
   
-  genes_present <- intersect(
-    unique(genes),
-    rownames(vsd_mat)
-  )
+  module_mat_z <- t(scale(t(vsd_mat[genes_present, , drop = FALSE])))
   
-  if (length(genes_present) < 2) {
-    stop(
-      module_name,
-      ": fewer than two genes found."
-    )
-  }
-  
-  module_mat <- vsd_mat[
-    genes_present,
-    ,
-    drop = FALSE
-  ]
-  
-  module_mat_z <- t(
-    scale(
-      t(module_mat)
-    )
-  )
+  message(module_name, ": ", length(genes_present), " genes present")
   
   tibble(
     sample = colnames(vsd_mat),
     module = module_name,
-    module_score = colMeans(
-      module_mat_z,
-      na.rm = TRUE
-    )
+    module_score = colMeans(module_mat_z, na.rm = TRUE)
   )
 }
 
-module_scores_all <- bind_rows(
-  lapply(
-    names(score_modules),
-    function(module_name) {
-      calculate_module_score(
-        score_modules[[module_name]],
-        module_name
-      )
-    }
-  )
-)
-
-module_scores_all <- module_scores_all %>%
+module_scores_all <- bind_rows(lapply(
+  names(score_modules),
+  \(m) calculate_module_score(score_modules[[m]], m)
+)) %>%
   left_join(
     as.data.frame(colData(dds)) %>%
       rownames_to_column("sample") %>%
-      select(
-        sample,
-        condition,
-        replicate
-      ),
+      dplyr::select(sample, condition, replicate),
     by = "sample"
   ) %>%
   mutate(
     condition_plot = case_when(
       condition == "D2 Control" ~ "Control",
-      condition == "D2 Dox" ~ "Dox"
+      condition == "D2 Dox" ~ "Dox",
+      TRUE ~ NA_character_
     ),
-    condition_plot = factor(
-      condition_plot,
-      levels = c(
-        "Control",
-        "Dox"
-      )
-    )
+    condition_plot = factor(condition_plot, levels = condition_plot_levels),
+    replicate = factor(replicate),
+    module = factor(module, levels = module_levels)
   )
 
+######################################################
+############ COMPLETE PAIRED MEASUREMENTS ############
+######################################################
+
+paired_scores <- module_scores_all %>%
+  filter(is.finite(module_score), !is.na(condition), !is.na(replicate)) %>%
+  dplyr::select(module, replicate, condition, module_score) %>%
+  mutate(condition = as.character(condition)) %>%
+  pivot_wider(names_from = condition, values_from = module_score) %>%
+  filter(!is.na(`D2 Control`), !is.na(`D2 Dox`))
+
+paired_scores
 
 ######################################################
-################ MODULE STATISTICS ###################
+################ PAIRED STATISTICS ###################
 ######################################################
 
-module_stats <- module_scores_all %>%
+empty_stats_row <- function(n_pairs = 0) tibble(
+  group1 = "Control", group2 = "Dox", n_pairs = n_pairs,
+  estimate = NA_real_, SE = NA_real_, df = NA_real_,
+  t.ratio = NA_real_, p.value = NA_real_
+)
+
+module_stats <- paired_scores %>%
   group_by(module) %>%
   group_modify(~ {
+    if (nrow(.x) < 2) return(empty_stats_row(nrow(.x)))
     
-    fit <- lm(
-      module_score ~ replicate + condition,
-      data = .x
+    control <- .x$`D2 Control`
+    dox <- .x$`D2 Dox`
+    diff <- dox - control
+    tt <- t.test(dox, control, paired = TRUE)
+    
+    tibble(
+      group1 = "Control", group2 = "Dox", n_pairs = nrow(.x),
+      estimate = mean(diff), SE = sd(diff) / sqrt(length(diff)),
+      df = unname(tt$parameter), t.ratio = unname(tt$statistic),
+      p.value = tt$p.value
     )
-    
-    emm <- emmeans(
-      fit,
-      ~ condition
-    )
-    
-    contrast(
-      emm,
-      method = "trt.vs.ctrl",
-      ref = "D2 Control",
-      adjust = "none"
-    ) %>%
-      as.data.frame() %>%
-      as_tibble() %>%
-      transmute(
-        group1 = "Control",
-        group2 = "Dox",
-        p.value = p.value
-      )
   }) %>%
   ungroup() %>%
   mutate(
     p_label = case_when(
+      is.na(p.value) ~ "p=NA",
       p.value < 0.001 ~ "p<0.001",
-      TRUE ~ paste0(
-        "p=",
-        signif(p.value, 2)
-      )
+      TRUE ~ paste0("p=", signif(p.value, 2))
     )
   )
 
+module_stats
+
+######################################################
+############ P-VALUE BRACKET POSITIONS ###############
+######################################################
+
 module_y <- module_scores_all %>%
+  filter(is.finite(module_score)) %>%
   group_by(module) %>%
-  summarise(
-    y_max = max(module_score),
-    y_min = min(module_score),
-    .groups = "drop"
-  ) %>%
+  summarise(y_min = min(module_score), y_max = max(module_score), .groups = "drop") %>%
   mutate(
-    y_min_plot = pmin(
-      y_min,
-      -1
-    ),
-    y_range = y_max - y_min_plot,
+    y_min_plot = pmin(y_min, -1),
+    y_range = pmax(y_max - y_min_plot, 0.25),
     y.position = y_max + 0.20 * y_range
   )
 
-module_stats <- module_stats %>%
-  left_join(
-    module_y,
-    by = "module"
-  )
-
+module_stats <- module_stats %>% left_join(module_y, by = "module")
 
 ######################################################
 ################ MODULE PLOT FUNCTION ################
 ######################################################
 
-make_module_panel <- function(
-    modules,
-    panel_title,
-    ncol_panel
-) {
+make_module_panel <- function(modules, panel_title, ncol_panel) {
   
+  # Use the same complete pairs in the plot as in the paired test
   panel_dat <- module_scores_all %>%
-    filter(module %in% modules) %>%
-    mutate(
-      module = factor(
-        module,
-        levels = modules
-      )
-    )
+    filter(module %in% modules, is.finite(module_score),
+           !is.na(condition_plot), !is.na(replicate)) %>%
+    mutate(module = factor(as.character(module), levels = modules)) %>%
+    group_by(module, replicate) %>%
+    filter(n_distinct(condition_plot) == 2) %>%
+    ungroup()
   
   panel_stats <- module_stats %>%
-    filter(module %in% modules) %>%
-    mutate(
-      module = factor(
-        module,
-        levels = modules
-      )
-    )
+    filter(module %in% modules, !is.na(y.position)) %>%
+    mutate(module = factor(as.character(module), levels = modules)) %>%
+    as.data.frame()
   
   lower_anchor <- tibble(
-    module = factor(
-      modules,
-      levels = modules
-    ),
-    condition_plot = factor(
-      "Control",
-      levels = c(
-        "Control",
-        "Dox"
-      )
-    ),
+    module = factor(modules, levels = modules),
+    condition_plot = factor("Control", levels = condition_plot_levels),
     module_score = -1
   )
   
-  ggplot(
-    panel_dat,
-    aes(
-      x = condition_plot,
-      y = module_score
-    )
-  ) +
-    geom_blank(
-      data = lower_anchor,
-      aes(
-        x = condition_plot,
-        y = module_score
-      ),
-      inherit.aes = FALSE
-    ) +
-    geom_hline(
-      yintercept = 0,
-      linetype = "dashed",
-      colour = "grey70",
-      linewidth = 0.4
-    ) +
+  ggplot(panel_dat, aes(condition_plot, module_score)) +
+    geom_blank(data = lower_anchor, aes(condition_plot, module_score), inherit.aes = FALSE) +
+    geom_hline(yintercept = 0, linetype = "dashed", colour = "grey70", linewidth = 0.4) +
+    
     geom_boxplot(
       aes(fill = condition_plot),
-      outlier.shape = NA,
-      colour = "black",
-      linewidth = 0.6,
-      width = 0.6
+      outlier.shape = NA, colour = "black",
+      linewidth = 0.6, width = 0.6
     ) +
+    
+    # Paired measurements
+    geom_line(
+      aes(group = replicate),
+      colour = "grey55", linewidth = 0.55, alpha = 0.8
+    ) +
+    
     geom_point(
       aes(fill = condition_plot),
-      position = position_jitter(
-        width = 0.08,
-        height = 0
-      ),
-      shape = 21,
-      colour = "black",
-      stroke = 0.5,
-      size = 3
+      shape = 21, colour = "black",
+      stroke = 0.5, size = 3
     ) +
+    
     stat_pvalue_manual(
       panel_stats,
       label = "p_label",
-      xmin = "group1",
-      xmax = "group2",
+      xmin = "group1", xmax = "group2",
       y.position = "y.position",
       tip.length = 0.01,
       bracket.size = 0.4,
       size = 5,
       vjust = -0.6
     ) +
-    ggh4x::facet_wrap2(
-      ~ module,
+    
+    facet_wrap(
+      ~module,
       scales = "free_y",
-      ncol = ncol_panel,
-      axes = "all",
-      remove_labels = "none"
+      ncol = ncol_panel
     ) +
+    
     scale_fill_manual(
-      values = group_cols_boxplot
+      values = group_cols_boxplot,
+      limits = condition_plot_levels,
+      drop = FALSE
     ) +
+    
+    scale_x_discrete(
+      limits = condition_plot_levels,
+      drop = FALSE
+    ) +
+    
     scale_y_continuous(
-      expand = expansion(
-        mult = c(0, 0.18)
-      )
+      expand = expansion(mult = c(0, 0.18))
     ) +
+    
     labs(
       title = panel_title,
       x = NULL,
       y = "Module score\n(mean z-scored VST expression)"
     ) +
+    
     theme_classic(base_size = 12) +
+    
     theme(
-      plot.title = element_text(
-        size = 15,
-        hjust = 0.5
-      ),
-      strip.background = element_blank(),
-      strip.text = element_text(
-        size = 13
-      ),
-      axis.text.x = element_text(
-        size = 13,
-        colour = "black"
-      ),
-      axis.text.y = element_text(
-        size = 13,
-        colour = "black"
-      ),
-      axis.title.y = element_text(
-        size = 15,
-        colour = "black"
-      ),
+      plot.title = element_text(size = 15, hjust = 0.5),
+      strip.background = element_rect(fill = NA, colour = NA),
+      strip.text = element_text(size = 13),
+      axis.text.x = element_text(size = 13, colour = "black"),
+      axis.text.y = element_text(size = 13, colour = "black"),
+      axis.title.y = element_text(size = 15, colour = "black"),
       legend.position = "none"
     )
 }
-
 
 ######################################################
 ############### FIGURE 3I: LINEAGE ###################
 ######################################################
 
+lineage_modules <- c("Somite module", "Renal module", "Neural module")
+
 p_lineage_modules <- make_module_panel(
-  modules = c(
-    "Renal module",
-    "Somite module",
-    "Neural module"
-  ),
-  panel_title = "Lineage modules",
-  ncol_panel = 3
+  lineage_modules,
+  "Lineage modules",
+  3
 )
 
+p_lineage_modules
+
 ggsave(
-  file.path(
-    plot_dir,
-    "QP38Y5_hTLS66_D2_lineage_module_boxplots_Control_vs_Dox.pdf"
-  ),
+  file.path(plot_dir, "QP38Y5_hTLS66_D2_lineage_module_boxplots_Control_vs_Dox.pdf"),
   p_lineage_modules,
   width = 9,
   height = 4
 )
 
-
 ######################################################
 ############ FIGURE S3S: CELL-STATE ##################
 ######################################################
 
+state_modules <- c("G2/M cell-cycle score", "Apoptosis score")
+
 p_state_modules <- make_module_panel(
-  modules = c(
-    "G2/M cell-cycle score",
-    "Apoptosis score"
-  ),
-  panel_title = "Cell-state modules",
-  ncol_panel = 2
+  state_modules,
+  "Cell-state modules",
+  2
 )
 
+p_state_modules
+
 ggsave(
-  file.path(
-    plot_dir,
-    "QP38Y5_hTLS66_D2_cell_state_module_boxplots_Control_vs_Dox.pdf"
-  ),
+  file.path(plot_dir, "QP38Y5_hTLS66_D2_cell_state_module_boxplots_Control_vs_Dox.pdf"),
   p_state_modules,
   width = 4.2,
   height = 3.2
 )
+
+######################################################
+################ SAVE MODULE DATA ####################
+######################################################
+
+write.csv(
+  module_scores_all,
+  file.path(plot_dir, "QP38Y5_hTLS66_D2_module_scores_Control_vs_Dox.csv"),
+  row.names = FALSE
+)
+
+write.csv(
+  module_stats,
+  file.path(plot_dir, "QP38Y5_hTLS66_D2_module_score_paired_tests_Control_vs_Dox.csv"),
+  row.names = FALSE
+)
+
