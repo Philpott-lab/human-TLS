@@ -20,9 +20,6 @@ Bulk RNA-seq analysis of acute CRISPRi-mediated endogenous TBX6 knockdown, with 
 `dCas9_TBX6_timed_D5_RNA-seq/`  
 Bulk RNA-seq analysis of timed CRISPRi-mediated endogenous TBX6 knockdown, comparing different temporal windows of TBX6 activity at day 5 of hTLS differentiation.
 
-`TBX6_dTAG_D5_RNA-seq/`  
-Bulk RNA-seq analysis of sustained TBX6-FKBP overexpression and timed dTAG-mediated TBX6 protein degradation during hTLS differentiation, with samples harvested at day 5.
-
 `dCas9_F1F2_RNA-seq/`  
 Bulk RNA-seq analysis of CRISPRi FOXC1/2 perturbation experiments (DESeq2, marker analysis, GSEA, gene expression visualisation).
 
