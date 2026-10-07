@@ -61,8 +61,6 @@ Input datasets generated in this study are available for download from the GEO d
 
 `dCas9_TBX6_timed_D5_RNA-seq/` — available soon
 
-`TBX6_dTAG_D5_RNA-seq/` — available soon
-
 `dCas9_F1F2_RNA-seq/` — available soon
 
 Scripts expect locally stored data (e.g. count tables, metadata and reference datasets), and file paths will need to be updated accordingly.
